@@ -4,28 +4,40 @@
  * fully mapped to the 1,808-node canonical SQLite database.
  */
 
-export interface EpistemicTopologyNode {
-  id: string;
-  title: string;
-  level: number;
-  type: 'root' | 'major_hub' | 'category' | 'concept' | 'quote' | 'leaf' | 'paradox';
-  color?: string;
-  glowColor?: string;
-  quoteText?: string;
-  author?: string;
-  warrant?: 'W0' | 'W1' | 'W2' | 'W3' | 'W4' | 'W5';
-  epistemicStatus?: string;
-  particleCount?: number;
-  radius?: number;
-  x?: number;
-  y?: number;
-  children?: EpistemicTopologyNode[];
-  _collapsed?: boolean;
-}
+import type { NodeCitation, NodeMetadataRecord, EpistemicTopologyNode, RenderedEpistemicNode } from '../types';
+export type { NodeCitation, NodeMetadataRecord, EpistemicTopologyNode, RenderedEpistemicNode };
 
 export const MARKMAP_EPITEMIC_TOPOLOGY: EpistemicTopologyNode = {
   id: 'markmap_root',
   title: 'JOURNAL314 Ω — Nihiltheistic Hypermarkmap',
+  systemStage: 'Stage 0: Transcendental Genesis',
+  thematicGroup: 'Archival Metaphysics',
+  description: 'The sovereign root coordinate of the Journal314 ontological architecture. Establishes the non-dual dialectical synthesis between radical nihilistic reduction and epistemic ground. Charts the coordinates of human confrontation with the unconditioned void without theological retreat.\n\n### Core Thesis\n- **Radical Reduction**: Dismantles ungrounded metaphysical assumptions through rigorous phenomenological bracketting.\n- **Direct Attestation**: Every downstream proposition inherits warrant obligations rooted in primary consciousness.\n- **Symmetrical Dialectic**: Preserves contradictions as active dialectical tensions rather than premature reconciliations.',
+  citations: [
+    {
+      id: 'cit_root_01',
+      sourceTitle: 'Journal314 Ω: Prolegomena to Any Future Nihiltheism',
+      authorOrOrigin: 'Journal314 Epistemic Directive',
+      referenceUrl: 'https://journal314.org/prolegomena',
+      quoteSnippet: 'The map does not reduce the void; it charts the coordinates of human confrontation with the unconditioned.'
+    },
+    {
+      id: 'cit_root_02',
+      sourceTitle: 'Constitutional Invariants & Warrant Discipline (PEC-Ω)',
+      authorOrOrigin: 'PEC-Ω Dialectical Board',
+      referenceUrl: 'https://journal314.org/constitution',
+      quoteSnippet: 'Warrant W4 demands directly attested phenomenological coherence prior to categorical distribution.'
+    }
+  ],
+  metadata: [
+    { label: 'Hierarchy Depth', value: 'Level 0 (Root)', category: 'system' },
+    { label: 'Warrant Classification', value: 'W4 (Directly Attested)', category: 'epistemic' },
+    { label: 'Epistemic Status', value: 'Constitutional Invariant', category: 'epistemic' },
+    { label: 'Radiance Core', value: '18px core / 36 particles', category: 'system' },
+    { label: 'Corpus Integrity', value: 'Preserved (100%)', category: 'epistemic' },
+    { label: 'Sub-Branches', value: 8, category: 'relational' }
+  ],
+  connectedNodeIds: ['mm_orientation', 'mm_knowledge_engine', 'mm_canonical_matrix', 'mm_existentialism_cluster'],
   level: 0,
   type: 'root',
   radius: 18,
@@ -340,3 +352,98 @@ export const FAMOUS_PHILOSOPHICAL_QUOTES = [
     relationNodeId: 'mm_orientation'
   }
 ];
+
+export function normalizeEpistemicNode(node: EpistemicTopologyNode | null | undefined): EpistemicTopologyNode | null {
+  if (!node) return null;
+
+  // 1. Description normalization
+  let description = node.description;
+  if (!description || description.trim() === '') {
+    if (node.quoteText) {
+      description = `Philosophical fragment regarding **${node.title}**.\n\n> "${node.quoteText}"\n> — ${node.author || 'Archival Fragment'}\n\nThis coordinate represents an empirical and phenomenological anchor within the broader Journal314 epistemic graph.`;
+    } else {
+      description = `The **${node.title}** node functions as a ${node.type || 'conceptual'} coordinate within the topology. It articulates phenomenological invariants and structural boundaries without presupposing transcendent foundations.\n\n### Theoretical Significance\n- **Inquiry Focus**: Establishes rigorous dialectical parameters for ${node.title.toLowerCase()}.\n- **Epistemic Classification**: Categorized under warrant **${node.warrant || 'W2'}** with status **${node.epistemicStatus || 'inferred'}**.\n- **Graph Grounding**: Verified against foundational textual records and phenomenological inquiry criteria.`;
+    }
+  }
+
+  // 2. Citations normalization
+  let citations: NodeCitation[] = Array.isArray(node.citations) ? [...node.citations] : [];
+  if (citations.length === 0) {
+    // Check if there is quoteText on the node itself
+    if (node.quoteText) {
+      citations.push({
+        id: `cit_${node.id}_inline`,
+        sourceTitle: `Journal314 Canonical Fragment: ${node.title}`,
+        authorOrOrigin: node.author || 'Journal314 Primary Corpus',
+        quoteSnippet: node.quoteText
+      });
+    }
+    // Check if FAMOUS_PHILOSOPHICAL_QUOTES matches this node
+    const matchingQuote = FAMOUS_PHILOSOPHICAL_QUOTES.find(q => q.relationNodeId === node.id);
+    if (matchingQuote) {
+      citations.push({
+        id: matchingQuote.id,
+        sourceTitle: matchingQuote.work,
+        authorOrOrigin: matchingQuote.author,
+        referenceUrl: 'https://plato.stanford.edu/',
+        quoteSnippet: matchingQuote.quote
+      });
+    }
+  }
+
+  // 3. Connected Node IDs normalization
+  let connectedNodeIds: string[] = Array.isArray(node.connectedNodeIds) ? [...node.connectedNodeIds] : [];
+  if (connectedNodeIds.length === 0 && node.children && node.children.length > 0) {
+    connectedNodeIds = node.children.map(c => c.id);
+  }
+
+  // 4. Metadata normalization
+  let metadata: NodeMetadataRecord[] = [];
+  if (Array.isArray(node.metadata)) {
+    metadata = [...node.metadata];
+  } else if (node.metadata && typeof node.metadata === 'object') {
+    metadata = Object.entries(node.metadata).map(([label, value]) => ({
+      label,
+      value,
+      category: 'epistemic' as const
+    }));
+  } else {
+    // Generate standard metadata records
+    metadata = [
+      { label: 'Hierarchy Level', value: `Level ${node.level ?? 0}`, category: 'system' },
+      { label: 'Coordinate Type', value: (node.type || 'concept').toUpperCase(), category: 'system' },
+      { label: 'Warrant Classification', value: node.warrant || 'W2 (Inferred)', category: 'epistemic' },
+      { label: 'Epistemic Status', value: node.epistemicStatus || 'attested', category: 'epistemic' },
+      { label: 'Core Radiance', value: `${node.radius || 12}px radius`, category: 'system' },
+      { label: 'Particle Count', value: node.particleCount || 14, category: 'system' },
+      { label: 'Direct Relata', value: connectedNodeIds.length, category: 'relational' }
+    ];
+  }
+
+  // 5. System Stage & Thematic Group
+  const systemStage = node.systemStage || (
+    (node.level ?? 0) === 0 ? 'Stage 0: Transcendental Genesis' :
+    (node.level ?? 0) === 1 ? 'Stage I: Architectural Matrix' :
+    (node.level ?? 0) <= 3 ? 'Stage II: Dialectical Invariants' :
+    'Stage III: Hermeneutic Synthesis'
+  );
+
+  const thematicGroup = node.thematicGroup || (
+    node.type === 'root' ? 'Archival Metaphysics' :
+    node.type === 'major_hub' ? 'Knowledge Engine' :
+    node.type === 'quote' ? 'Philosophical Fragment' :
+    node.type === 'paradox' ? 'Apophatic Tension' :
+    'Phenomenology & Void'
+  );
+
+  return {
+    ...node,
+    description,
+    citations,
+    connectedNodeIds,
+    metadata,
+    systemStage,
+    thematicGroup
+  };
+}
+

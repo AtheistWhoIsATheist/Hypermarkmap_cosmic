@@ -8,12 +8,23 @@ import {
   ChevronRight,
   Sparkles,
   X,
-  Quote
+  Quote,
+  Upload,
+  Trash2,
+  FileText,
+  HardDrive
 } from 'lucide-react';
 import {
   MARKMAP_EPITEMIC_TOPOLOGY,
   type EpistemicTopologyNode
 } from './GroundedEpistemicTopologyData';
+import { NodeInspectorDrawer } from './NodeInspectorDrawer';
+import { IngestionModal } from './IngestionModal';
+import { GoogleWorkspaceModal } from './GoogleWorkspaceModal';
+import { subscribeAuthState, getCurrentUser } from '../services/workspace/authService';
+import { GraphStorage } from '../storage/GraphStorage';
+import type { GraphNode, GraphEdge, IngestionBatchItem } from '../types/graph';
+import type { User } from 'firebase/auth';
 
 interface PositionedNode extends EpistemicTopologyNode {
   x: number;
@@ -63,6 +74,37 @@ export const TopologyVisualizer: React.FC = () => {
   const [selectedNode, setSelectedNode] = useState<EpistemicTopologyNode | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isIngestionOpen, setIsIngestionOpen] = useState(false);
+  const [isWorkspaceOpen, setIsWorkspaceOpen] = useState(false);
+  const [googleUser, setGoogleUser] = useState<User | null>(() => getCurrentUser());
+  const [ingestedGraph, setIngestedGraph] = useState<{ nodes: GraphNode[]; edges: GraphEdge[] }>(() =>
+    GraphStorage.getIngestedGraphSync()
+  );
+
+  useEffect(() => {
+    const unsub = subscribeAuthState((u) => setGoogleUser(u));
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    GraphStorage.hydrateCache().then(() => {
+      setIngestedGraph(GraphStorage.getIngestedGraphSync());
+    });
+  }, []);
+
+  const handleIngestionComplete = useCallback((_items?: IngestionBatchItem[]) => {
+    const updated = GraphStorage.getIngestedGraphSync();
+    setIngestedGraph(updated);
+  }, []);
+
+  const handleClearIngested = useCallback(async () => {
+    if (window.confirm('Clear all ingested documents and reset graph to baseline topology?')) {
+      await GraphStorage.clearIngestedGraph();
+      setIngestedGraph(GraphStorage.getIngestedGraphSync());
+      setSelectedNode(null);
+      setDrawerOpen(false);
+    }
+  }, []);
 
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -181,8 +223,197 @@ export const TopologyVisualizer: React.FC = () => {
     }
 
     layoutSubtree(treeData, rootPos, 1, -Math.PI, Math.PI * 2);
+
+    // Ingested Nodes Layout: Radial positioning of Document Hubs and their extracted sections & relata
+    if (ingestedGraph.nodes.length > 0) {
+      const docHubs = ingestedGraph.nodes.filter(n => n.nodeKind === 'document-hub');
+      const nonHubs = ingestedGraph.nodes.filter(n => n.nodeKind !== 'document-hub');
+
+      const hubCount = Math.max(docHubs.length, 1);
+      const hubAngleStep = (Math.PI * 2) / hubCount;
+
+      docHubs.forEach((hub, hIdx) => {
+        const hubAngle = -Math.PI / 2 + hIdx * hubAngleStep;
+        const hubX = Math.cos(hubAngle) * 880;
+        const hubY = Math.sin(hubAngle) * 880;
+
+        const isMatch = Boolean(
+          qLower && (
+            hub.title?.toLowerCase().includes(qLower) ||
+            hub.label.toLowerCase().includes(qLower) ||
+            hub.description?.toLowerCase().includes(qLower)
+          )
+        );
+
+        const hubPos: PositionedNode = {
+          id: hub.id,
+          title: hub.title || hub.label,
+          description: hub.description || hub.content,
+          systemStage: hub.systemStage || 'Document Ingestion',
+          thematicGroup: hub.thematicGroup || 'Ingested Corpus',
+          citations: (hub.citations || []).map((c, i) =>
+            typeof c === 'string' ? { id: `cit_${i}`, sourceTitle: hub.sourceFile, quoteSnippet: c } : c
+          ),
+          metadata: Object.entries(hub.metadata || {}).map(([l, v]) => ({ label: l, value: v, category: 'system' as const })),
+          connectedNodeIds: hub.connectedNodeIds || [],
+          level: 1,
+          type: 'document-hub',
+          radius: 16,
+          particleCount: 14,
+          color: '#38bdf8',
+          glowColor: 'rgba(56, 189, 248, 0.45)',
+          x: hubX,
+          y: hubY,
+          isMatch,
+          parent: rootPos,
+          nodeKind: hub.nodeKind,
+          processingMode: hub.processingMode,
+          confidenceStatus: hub.confidenceStatus,
+          sourceSpans: hub.sourceSpans,
+          sourceFile: hub.sourceFile
+        };
+        positioned.push(hubPos);
+
+        const fileNodes = nonHubs.filter(n => n.sourceFile === hub.sourceFile);
+        const sections = fileNodes.filter(n => n.nodeKind === 'section');
+        const concepts = fileNodes.filter(n => n.nodeKind !== 'section');
+
+        const secCount = Math.max(sections.length, 1);
+        const secAngleSpan = Math.PI * 0.8;
+        const secAngleStart = hubAngle - secAngleSpan / 2;
+
+        sections.forEach((sec, sIdx) => {
+          const secAngle = secAngleStart + (secCount === 1 ? secAngleSpan / 2 : (sIdx / (secCount - 1)) * secAngleSpan);
+          const secX = hubX + Math.cos(secAngle) * 160;
+          const secY = hubY + Math.sin(secAngle) * 160;
+
+          const secMatch = Boolean(
+            qLower && (
+              sec.title?.toLowerCase().includes(qLower) ||
+              sec.label.toLowerCase().includes(qLower) ||
+              sec.description?.toLowerCase().includes(qLower)
+            )
+          );
+
+          const secPos: PositionedNode = {
+            id: sec.id,
+            title: sec.title || sec.label,
+            description: sec.description || sec.content,
+            systemStage: sec.systemStage,
+            thematicGroup: sec.thematicGroup,
+            citations: (sec.citations || []).map((c, i) =>
+              typeof c === 'string' ? { id: `cit_${i}`, sourceTitle: sec.sourceFile, quoteSnippet: c } : c
+            ),
+            metadata: Object.entries(sec.metadata || {}).map(([l, v]) => ({ label: l, value: v, category: 'epistemic' as const })),
+            connectedNodeIds: sec.connectedNodeIds || [],
+            level: 2,
+            type: 'section',
+            radius: 12,
+            color: '#818cf8',
+            glowColor: 'rgba(129, 140, 248, 0.4)',
+            x: secX,
+            y: secY,
+            isMatch: secMatch,
+            parent: hubPos,
+            nodeKind: sec.nodeKind,
+            processingMode: sec.processingMode,
+            confidenceStatus: sec.confidenceStatus,
+            sourceSpans: sec.sourceSpans,
+            sourceFile: sec.sourceFile
+          };
+          positioned.push(secPos);
+
+          const childConcepts = concepts.filter(c =>
+            c.id.includes(sec.id) || (c.connectedNodeIds && c.connectedNodeIds.includes(sec.id))
+          );
+          const cCount = Math.max(childConcepts.length, 1);
+          const cAngleSpan = Math.PI * 0.6;
+          const cAngleStart = secAngle - cAngleSpan / 2;
+
+          childConcepts.forEach((concept, cIdx) => {
+            const cAngle = cAngleStart + (cCount === 1 ? cAngleSpan / 2 : (cIdx / (cCount - 1)) * cAngleSpan);
+            const cX = secX + Math.cos(cAngle) * 110;
+            const cY = secY + Math.sin(cAngle) * 110;
+
+            const cMatch = Boolean(
+              qLower && (
+                concept.title?.toLowerCase().includes(qLower) ||
+                concept.label.toLowerCase().includes(qLower) ||
+                concept.description?.toLowerCase().includes(qLower)
+              )
+            );
+
+            const isUnresolved = concept.nodeKind === 'unresolved-reference';
+            const conceptPos: PositionedNode = {
+              id: concept.id,
+              title: concept.title || concept.label,
+              description: concept.description || concept.content,
+              systemStage: concept.systemStage,
+              thematicGroup: concept.thematicGroup,
+              citations: (concept.citations || []).map((c, i) =>
+                typeof c === 'string' ? { id: `cit_${i}`, sourceTitle: concept.sourceFile, quoteSnippet: c } : c
+              ),
+              metadata: Object.entries(concept.metadata || {}).map(([l, v]) => ({ label: l, value: v, category: 'epistemic' as const })),
+              connectedNodeIds: concept.connectedNodeIds || [],
+              level: 3,
+              type: concept.nodeKind,
+              radius: isUnresolved ? 8 : 10,
+              color: isUnresolved ? '#f59e0b' : concept.confidenceStatus === 'source-explicit' ? '#10b981' : '#00f0ff',
+              glowColor: isUnresolved ? 'rgba(245, 158, 11, 0.4)' : 'rgba(0, 240, 255, 0.4)',
+              x: cX,
+              y: cY,
+              isMatch: cMatch,
+              parent: secPos,
+              nodeKind: concept.nodeKind,
+              processingMode: concept.processingMode,
+              confidenceStatus: concept.confidenceStatus,
+              sourceSpans: concept.sourceSpans,
+              sourceFile: concept.sourceFile
+            };
+            positioned.push(conceptPos);
+          });
+        });
+
+        const assignedIds = new Set(positioned.map(p => p.id));
+        const orphanConcepts = fileNodes.filter(n => !assignedIds.has(n.id));
+        orphanConcepts.forEach((orphan, oIdx) => {
+          const oAngle = hubAngle + Math.PI + (oIdx * 0.4);
+          const oX = hubX + Math.cos(oAngle) * 120;
+          const oY = hubY + Math.sin(oAngle) * 120;
+          const isUnresolved = orphan.nodeKind === 'unresolved-reference';
+
+          positioned.push({
+            id: orphan.id,
+            title: orphan.title || orphan.label,
+            description: orphan.description || orphan.content,
+            systemStage: orphan.systemStage,
+            thematicGroup: orphan.thematicGroup,
+            citations: (orphan.citations || []).map((c, i) =>
+              typeof c === 'string' ? { id: `cit_${i}`, sourceTitle: orphan.sourceFile, quoteSnippet: c } : c
+            ),
+            metadata: Object.entries(orphan.metadata || {}).map(([l, v]) => ({ label: l, value: v, category: 'epistemic' as const })),
+            connectedNodeIds: orphan.connectedNodeIds || [],
+            level: 3,
+            type: orphan.nodeKind,
+            radius: isUnresolved ? 8 : 10,
+            color: isUnresolved ? '#f59e0b' : '#00f0ff',
+            glowColor: isUnresolved ? 'rgba(245, 158, 11, 0.4)' : 'rgba(0, 240, 255, 0.4)',
+            x: oX,
+            y: oY,
+            isMatch: qLower ? (orphan.title?.toLowerCase().includes(qLower) || orphan.label.toLowerCase().includes(qLower)) : false,
+            parent: hubPos,
+            nodeKind: orphan.nodeKind,
+            processingMode: orphan.processingMode,
+            confidenceStatus: orphan.confidenceStatus,
+            sourceSpans: orphan.sourceSpans,
+            sourceFile: orphan.sourceFile
+          });
+        });
+      });
+    }
+
     return positioned;
-  }, [treeData, searchQuery]);
+  }, [treeData, searchQuery, ingestedGraph]);
 
   // Mouse & Gesture Handlers
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -260,8 +491,78 @@ export const TopologyVisualizer: React.FC = () => {
     if (found) {
       setSelectedNode(found);
       setDrawerOpen(true);
+    } else {
+      // Backdrop dismissal: clicking empty canvas dismisses inspector
+      setDrawerOpen(false);
+      setSelectedNode(null);
     }
   };
+
+  // Lookup map for fast node retrieval by ID across the entire hierarchy
+  const allNodesMap = useMemo(() => {
+    const map = new Map<string, EpistemicTopologyNode>();
+    const traverse = (n: EpistemicTopologyNode) => {
+      map.set(n.id, n);
+      if (n.children) n.children.forEach(traverse);
+    };
+    traverse(treeData);
+
+    // Index ingested nodes for relational drawer lookups
+    ingestedGraph.nodes.forEach((n) => {
+      map.set(n.id, {
+        id: n.id,
+        title: n.title || n.label,
+        description: n.description || n.content,
+        systemStage: n.systemStage,
+        thematicGroup: n.thematicGroup,
+        citations: (n.citations || []).map((c, i) =>
+          typeof c === 'string' ? { id: `cit_${i}`, sourceTitle: n.sourceFile, quoteSnippet: c } : c
+        ),
+        metadata: Object.entries(n.metadata || {}).map(([l, v]) => ({ label: l, value: v, category: 'epistemic' as const })),
+        connectedNodeIds: n.connectedNodeIds,
+        nodeKind: n.nodeKind,
+        processingMode: n.processingMode,
+        confidenceStatus: n.confidenceStatus,
+        sourceSpans: n.sourceSpans,
+        sourceFile: n.sourceFile
+      });
+    });
+
+    return map;
+  }, [treeData, ingestedGraph.nodes]);
+
+  // Center camera smoothly on any selected topology node
+  const handleCenterNode = useCallback((node: EpistemicTopologyNode) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const pos = layoutTree.find(n => n.id === node.id);
+    if (!pos) return;
+    const drawerOffset = window.innerWidth >= 640 ? 220 : 0;
+    const targetX = (canvas.clientWidth - drawerOffset) / 2 - pos.x * viewport.scale;
+    const targetY = canvas.clientHeight / 2 - pos.y * viewport.scale;
+    setViewport(v => ({ ...v, x: targetX, y: targetY }));
+  }, [layoutTree, viewport.scale]);
+
+  // Filter or highlight connected relata
+  const handleFilterConnected = useCallback((node: EpistemicTopologyNode) => {
+    if (node.title) {
+      const cleanKeyword = node.title.replace(/^[\d.]+\s*/, '').split(':')[0].trim();
+      setSearchQuery(cleanKeyword);
+    }
+  }, []);
+
+  // Select node by ID from drawer connected links
+  const handleSelectNodeById = useCallback((nodeId: string) => {
+    const target = allNodesMap.get(nodeId);
+    if (target) {
+      setSelectedNode(target);
+      setDrawerOpen(true);
+      const pos = layoutTree.find(n => n.id === nodeId);
+      if (pos) {
+        handleCenterNode(pos);
+      }
+    }
+  }, [allNodesMap, layoutTree, handleCenterNode]);
 
   const handleResetView = () => {
     const canvas = canvasRef.current;
@@ -443,6 +744,62 @@ export const TopologyVisualizer: React.FC = () => {
         ctx.stroke();
       });
 
+      // Render Ingested Cross-Edges & Semantic Relata
+      if (ingestedGraph.edges.length > 0) {
+        ctx.save();
+        const posMap = new Map<string, PositionedNode>();
+        layoutTree.forEach(n => posMap.set(n.id, n));
+
+        ingestedGraph.edges.forEach((edge) => {
+          const s = posMap.get(edge.source);
+          const tNode = posMap.get(edge.target);
+          if (!s || !tNode) return;
+
+          const isEdgeHighlighted =
+            (selectedNode && (s.id === selectedNode.id || tNode.id === selectedNode.id)) ||
+            s.isMatch || tNode.isMatch;
+
+          // Quadratic Bézier curve with gentle arc
+          const midX = (s.x + tNode.x) / 2;
+          const midY = (s.y + tNode.y) / 2;
+          const dist = Math.hypot(tNode.x - s.x, tNode.y - s.y);
+          const nx = -(tNode.y - s.y) / (dist || 1) * 28;
+          const ny = (tNode.x - s.x) / (dist || 1) * 28;
+          const ctrlX = midX + nx;
+          const ctrlY = midY + ny;
+
+          ctx.beginPath();
+          ctx.moveTo(s.x, s.y);
+          ctx.quadraticCurveTo(ctrlX, ctrlY, tNode.x, tNode.y);
+
+          if (edge.edgeCategory === 'proposed' || edge.relationType === 'unresolved-citation' || edge.relationType === 'proposed-contradiction') {
+            ctx.setLineDash([5 / vp.scale, 5 / vp.scale]);
+            ctx.strokeStyle = edge.relationType === 'proposed-contradiction' ? 'rgba(244, 63, 94, 0.85)' : 'rgba(245, 158, 11, 0.85)';
+            ctx.lineWidth = (isEdgeHighlighted ? 2.8 : 1.4) / vp.scale;
+          } else if (edge.edgeCategory === 'philosophical') {
+            ctx.setLineDash([]);
+            ctx.strokeStyle = isEdgeHighlighted ? 'rgba(16, 185, 129, 0.95)' : 'rgba(16, 185, 129, 0.5)';
+            ctx.lineWidth = (isEdgeHighlighted ? 2.8 : 1.4) / vp.scale;
+          } else {
+            ctx.setLineDash([]);
+            ctx.strokeStyle = isEdgeHighlighted ? 'rgba(0, 240, 255, 0.85)' : 'rgba(56, 189, 248, 0.35)';
+            ctx.lineWidth = (isEdgeHighlighted ? 2.5 : 1.2) / vp.scale;
+          }
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          // Edge relation badge if zoomed in or highlighted
+          if (vp.scale > 0.65 || isEdgeHighlighted) {
+            ctx.font = '9px monospace';
+            ctx.fillStyle = isEdgeHighlighted ? '#ffffff' : 'rgba(203, 213, 225, 0.7)';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(edge.relationType || edge.label || '', ctrlX, ctrlY - 4);
+          }
+        });
+        ctx.restore();
+      }
+
       // Render Luminous Nodes & Optical Star Flares
       layoutTree.forEach((node) => {
         const radius = node.radius || 12;
@@ -486,7 +843,7 @@ export const TopologyVisualizer: React.FC = () => {
         ctx.stroke();
 
         // Node Typography
-        ctx.font = `${Math.max(10, (node.level <= 1 ? 13 : 11))}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+        ctx.font = `${Math.max(10, (node.level !== undefined && node.level <= 1 ? 13 : 11))}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
         ctx.fillStyle = isSelected ? '#ffffff' : isMatch ? '#fda4af' : '#e0f2fe';
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
@@ -510,7 +867,7 @@ export const TopologyVisualizer: React.FC = () => {
       window.removeEventListener('resize', handleResize);
       if (animFrameIdRef.current !== null) cancelAnimationFrame(animFrameIdRef.current);
     };
-  }, [layoutTree, selectedNode]);
+  }, [layoutTree, selectedNode, ingestedGraph]);
 
   return (
     <div
@@ -548,7 +905,7 @@ export const TopologyVisualizer: React.FC = () => {
 
       {/* 2. Floating Holographic Header Panel */}
       <header ref={headerRef}
-        className="absolute top-4 left-4 right-4 sm:right-auto sm:max-w-2xl z-30 p-4 rounded-xl border backdrop-blur-xl transition-all duration-300 pointer-events-auto"
+        className="absolute top-4 left-4 right-4 sm:right-auto sm:max-w-3xl z-30 p-4 rounded-xl border backdrop-blur-xl transition-all duration-300 pointer-events-auto"
         style={{
           backgroundColor: 'rgba(4, 8, 22, 0.75)',
           borderColor: 'rgba(56, 189, 248, 0.75)',
@@ -556,14 +913,65 @@ export const TopologyVisualizer: React.FC = () => {
         }}
       >
         <div className="flex flex-col space-y-2.5">
-          <div>
-            <h1 className="text-lg sm:text-xl font-bold tracking-wide text-white drop-shadow-[0_0_12px_rgba(0,240,255,0.7)] flex items-center gap-2">
-              <Sparkles className="w-5 h-5 text-cyan-400 animate-pulse" />
-              <span>JOURNAL314 Ω — Nihiltheistic Hypermap Visual</span>
-            </h1>
-            <p className="text-xs font-mono text-cyan-300/90 tracking-wider mt-0.5">
-              {layoutTree.length} visible nodes &nbsp;•&nbsp; Visual reference topology
-            </p>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h1 className="text-lg sm:text-xl font-bold tracking-wide text-white drop-shadow-[0_0_12px_rgba(0,240,255,0.7)] flex items-center gap-2">
+                <Sparkles className="w-5 h-5 text-cyan-400 animate-pulse" />
+                <span>JOURNAL314 Ω — Nihiltheistic Hypermap Visual</span>
+              </h1>
+              <p className="text-xs font-mono text-cyan-300/90 tracking-wider mt-0.5">
+                {layoutTree.length} visible nodes &nbsp;•&nbsp; Grounded Epistemic Topology
+                {ingestedGraph.nodes.length > 0 && (
+                  <span className="text-emerald-400 ml-2">
+                    (+{ingestedGraph.nodes.length} ingested from {new Set(ingestedGraph.nodes.map(n => n.sourceFile)).size} docs)
+                  </span>
+                )}
+              </p>
+            </div>
+
+            {/* Ingestion & Workspace Trigger Controls */}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setIsWorkspaceOpen(true)}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold text-blue-200 border transition-all duration-200 hover:text-white flex items-center gap-1.5 active:scale-95 cursor-pointer"
+                style={{
+                  backgroundColor: 'rgba(30, 58, 138, 0.75)',
+                  borderColor: 'rgba(96, 165, 250, 0.8)',
+                  boxShadow: '0 0 12px rgba(59, 130, 246, 0.35)'
+                }}
+                title="Google Drive & Google Docs: Browse, Ingest Docs, and Export Dossiers"
+              >
+                <HardDrive className="w-3.5 h-3.5 text-blue-400" />
+                <span>Drive & Docs</span>
+                {googleUser && (
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_#34d399]" />
+                )}
+              </button>
+
+              <button
+                onClick={() => setIsIngestionOpen(true)}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold text-emerald-200 border transition-all duration-200 hover:text-white flex items-center gap-1.5 active:scale-95 cursor-pointer"
+                style={{
+                  backgroundColor: 'rgba(6, 78, 59, 0.75)',
+                  borderColor: 'rgba(52, 211, 153, 0.8)',
+                  boxShadow: '0 0 12px rgba(16, 185, 129, 0.35)'
+                }}
+                title="Upload philosophical writings (Markdown, Text, PDF, JSON, CSV)"
+              >
+                <Upload className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Ingest Documents</span>
+              </button>
+
+              {ingestedGraph.nodes.length > 0 && (
+                <button
+                  onClick={handleClearIngested}
+                  className="p-1.5 rounded-lg text-xs font-medium text-rose-300 border border-rose-500/40 bg-rose-950/40 hover:bg-rose-900/60 transition active:scale-95 cursor-pointer"
+                  title="Clear Ingested Graph"
+                >
+                  <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 pt-1">
@@ -668,114 +1076,38 @@ export const TopologyVisualizer: React.FC = () => {
         </span>
       </footer>
 
-      {/* 5. Holographic Glassmorphic Node Inspector Drawer */}
-      {drawerOpen && selectedNode && (
-        <aside
-          className="absolute top-0 right-0 bottom-0 w-full sm:w-[420px] z-40 p-5 flex flex-col backdrop-blur-2xl border-l transition-transform duration-300 shadow-2xl overflow-y-auto"
-          style={{
-            backgroundColor: 'rgba(2, 6, 20, 0.90)',
-            borderColor: 'rgba(0, 240, 255, 0.6)',
-            boxShadow: '-10px 0 35px rgba(0, 240, 255, 0.25)'
-          }}
-        >
-          <div className="flex items-start justify-between pb-4 border-b border-cyan-500/30">
-            <div>
-              <div className="flex items-center gap-2 text-[10px] font-mono text-cyan-400 uppercase tracking-widest">
-                <span>{selectedNode.type.toUpperCase()}</span>
-                {selectedNode.warrant && (
-                  <span className="px-1.5 py-0.5 rounded bg-cyan-950 border border-cyan-500/60 text-cyan-300">
-                    {selectedNode.warrant}
-                  </span>
-                )}
-                {selectedNode.epistemicStatus && (
-                  <span className="text-zinc-400">• {selectedNode.epistemicStatus}</span>
-                )}
-              </div>
-              <h2 className="text-base font-bold text-white mt-1 leading-snug drop-shadow-[0_0_8px_rgba(0,240,255,0.5)]">
-                {selectedNode.title}
-              </h2>
-            </div>
-            <button
-              onClick={() => setDrawerOpen(false)}
-              aria-label="Close inspector"
-              className="p-1 rounded-lg text-cyan-400 hover:text-white hover:bg-cyan-950/50 transition"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          </div>
+      {/* 5. Accessible High-Performance Side-Panel Drawer */}
+      <NodeInspectorDrawer
+        node={selectedNode}
+        isOpen={drawerOpen}
+        onClose={() => {
+          setDrawerOpen(false);
+          setSelectedNode(null);
+          canvasRef.current?.focus();
+        }}
+        onCenterNode={handleCenterNode}
+        onFilterConnected={handleFilterConnected}
+        onSelectNode={handleSelectNodeById}
+        allNodesMap={allNodesMap}
+      />
 
-          <div className="mt-4 space-y-4 text-xs">
-            {selectedNode.quoteText && (
-              <div
-                className="p-4 rounded-xl border space-y-1.5"
-                style={{
-                  backgroundColor: 'rgba(8, 16, 36, 0.8)',
-                  borderColor: 'rgba(56, 189, 248, 0.5)'
-                }}
-              >
-                <div className="text-[10px] font-mono text-cyan-400 uppercase tracking-wider flex items-center gap-1.5">
-                  <Quote className="w-3 h-3" />
-                  <span>Philosophical Fragment</span>
-                </div>
-                <p className="italic font-serif text-sm text-cyan-100 leading-relaxed">
-                  “{selectedNode.quoteText}”
-                </p>
-                {selectedNode.author && (
-                  <p className="text-[11px] font-mono text-cyan-400 text-right">
-                    — {selectedNode.author}
-                  </p>
-                )}
-              </div>
-            )}
+      {/* 6. Document Ingestion Subsystem Modal */}
+      <IngestionModal
+        isOpen={isIngestionOpen}
+        onClose={() => setIsIngestionOpen(false)}
+        onIngestionComplete={handleIngestionComplete}
+        onOpenGoogleWorkspace={() => setIsWorkspaceOpen(true)}
+      />
 
-            <div className="p-3.5 rounded-xl bg-black/60 border border-zinc-800 space-y-2 font-mono text-xs">
-              <div className="text-[10px] text-zinc-400 uppercase tracking-wider">
-                Topological Metadata
-              </div>
-              <div className="grid grid-cols-2 gap-2 text-[11px]">
-                <div>
-                  <span className="text-zinc-500 block">Hierarchy Depth:</span>
-                  <span className="text-cyan-300 font-bold">Level {selectedNode.level}</span>
-                </div>
-                <div>
-                  <span className="text-zinc-500 block">Radiance Core:</span>
-                  <span className="text-purple-300 font-bold">{selectedNode.radius || 10}px</span>
-                </div>
-                <div>
-                  <span className="text-zinc-500 block">Particle Aura:</span>
-                  <span className="text-cyan-300 font-bold">
-                    {selectedNode.particleCount || 12} points
-                  </span>
-                </div>
-                <div>
-                  <span className="text-zinc-500 block">Corpus Integrity:</span>
-                  <span className="text-emerald-400 font-bold">Preserved (100%)</span>
-                </div>
-              </div>
-            </div>
-
-            {selectedNode.children && selectedNode.children.length > 0 && (
-              <div className="space-y-1.5">
-                <div className="text-[10px] font-mono text-zinc-400 uppercase tracking-wider">
-                  Connected Branches ({selectedNode.children.length})
-                </div>
-                <div className="space-y-1 max-h-56 overflow-y-auto pr-1">
-                  {selectedNode.children.map((child) => (
-                    <button
-                      key={child.id}
-                      onClick={() => setSelectedNode(child)}
-                      className="w-full text-left p-2 rounded-lg bg-zinc-950/70 border border-zinc-800/80 hover:border-cyan-500/60 hover:bg-cyan-950/30 text-zinc-300 hover:text-white transition flex items-center justify-between"
-                    >
-                      <span className="truncate">{child.title}</span>
-                      <ChevronRight className="w-3.5 h-3.5 text-cyan-400 flex-shrink-0" />
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        </aside>
-      )}
+      {/* 7. Google Workspace Integration Modal (Drive & Docs) */}
+      <GoogleWorkspaceModal
+        isOpen={isWorkspaceOpen}
+        onClose={() => setIsWorkspaceOpen(false)}
+        onIngestionComplete={handleIngestionComplete}
+        selectedNode={selectedNode}
+        baselineTree={treeData}
+        ingestedGraph={ingestedGraph}
+      />
     </div>
   );
 };
