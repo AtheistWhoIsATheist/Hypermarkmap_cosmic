@@ -261,7 +261,7 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
       fileSize: f.size,
       mimeType: f.type || 'text/plain',
       status: 'processing',
-      stageLabel: idx === 0 ? 'Parsing document structure...' : 'Queued in pipeline...',
+      stageLabel: idx === 0 ? 'Validating document & computing fingerprint...' : 'Queued in pipeline...',
       processingMode
     }));
     setBatchResults(initialItems);
@@ -274,12 +274,6 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
           setBatchResults((prev) => {
             const next = [...prev];
             next[idx] = item;
-            if (idx + 1 < total && next[idx + 1]?.status === 'processing') {
-              next[idx + 1] = {
-                ...next[idx + 1],
-                stageLabel: 'Parsing document structure...'
-              };
-            }
             return next;
           });
         },
@@ -292,6 +286,15 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
       onIngestionComplete?.(results);
     } catch (err) {
       console.error('[IngestionModal] Batch processing error:', err);
+      const msg = err instanceof Error ? err.message : 'Batch processing failed';
+      setActiveStageLabel(`Error: ${msg}`);
+      setBatchResults((prev) =>
+        prev.map((item) =>
+          item.status === 'processing'
+            ? { ...item, status: 'error', errorMessage: msg, stageLabel: 'Failed' }
+            : item
+        )
+      );
     } finally {
       setIsProcessing(false);
     }

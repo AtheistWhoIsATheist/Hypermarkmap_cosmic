@@ -116,7 +116,10 @@ export const LOD_TIER_LABELS: Record<LoDTier, { name: string; description: strin
   3: { name: 'Tier 3: Deep Inspection', description: 'Full Headlines, Provenance Badges & Relation Predicates' }
 };
 
-export function getLoDTier(scale: number): LoDTier {
+export function getLoDTier(scale: number | null | undefined): LoDTier {
+  if (scale == null || !Number.isFinite(scale) || scale <= 0) {
+    return 1; // Structural Meso View as safe baseline default
+  }
   if (scale < LOD_THRESHOLDS.TIER_0_MAX) return 0; // Macro Constellation View
   if (scale < LOD_THRESHOLDS.TIER_1_MAX) return 1; // Structural Meso View
   if (scale < LOD_THRESHOLDS.TIER_2_MAX) return 2; // Conceptual Micro View
@@ -161,8 +164,8 @@ export class ScreenSpaceLabelCuller {
 
   public reset(viewportWidth: number, viewportHeight: number, maxLabels = 55): void {
     this.occupiedRects = [];
-    this.width = viewportWidth;
-    this.height = viewportHeight;
+    this.width = Number.isFinite(viewportWidth) && viewportWidth > 0 ? viewportWidth : 1920;
+    this.height = Number.isFinite(viewportHeight) && viewportHeight > 0 ? viewportHeight : 1080;
     this.maxVisibleLabels = maxLabels;
   }
 
@@ -171,6 +174,9 @@ export class ScreenSpaceLabelCuller {
    * so text labels do not draw directly over neighbor node orbs.
    */
   public registerNodeOrb(screenX: number, screenY: number, screenRadius: number): void {
+    if (!Number.isFinite(screenX) || !Number.isFinite(screenY) || !Number.isFinite(screenRadius)) {
+      return;
+    }
     const pad = 4;
     this.occupiedRects.push({
       x1: screenX - screenRadius - pad,
@@ -185,6 +191,7 @@ export class ScreenSpaceLabelCuller {
    * Checks whether a screen point is inside the viewport frustum with margin
    */
   public isInFrustum(screenX: number, screenY: number): boolean {
+    if (!Number.isFinite(screenX) || !Number.isFinite(screenY)) return false;
     return (
       screenX >= -this.margin &&
       screenX <= this.width + this.margin &&
@@ -197,6 +204,14 @@ export class ScreenSpaceLabelCuller {
    * Attempts to place a label rectangle. Returns true if accepted with no collision.
    */
   public testAndInsert(rect: ScreenRect): boolean {
+    if (
+      !Number.isFinite(rect.x1) ||
+      !Number.isFinite(rect.x2) ||
+      !Number.isFinite(rect.y1) ||
+      !Number.isFinite(rect.y2)
+    ) {
+      return false;
+    }
     if (this.occupiedRects.length >= this.maxVisibleLabels + 10) {
       return false;
     }

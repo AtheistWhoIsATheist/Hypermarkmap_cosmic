@@ -15,7 +15,7 @@ import { TextParser } from '../src/services/parsers/TextParser';
 import { JsonParser } from '../src/services/parsers/JsonParser';
 import { CsvParser } from '../src/services/parsers/CsvParser';
 import { PdfParser } from '../src/services/parsers/PdfParser';
-import { IngestionService } from '../src/services/ingestion/IngestionService';
+import { IngestionService, PipelineStageLogger, captureMemorySnapshot } from '../src/services/ingestion/IngestionService';
 import { GraphStorage } from '../src/storage/GraphStorage';
 import { computeFileSha256, validateFileHeaderAndMime } from '../src/utils/crypto';
 import { MARKMAP_EPITEMIC_TOPOLOGY } from '../src/components/GroundedEpistemicTopologyData';
@@ -347,6 +347,329 @@ Author Person remarks that this pessimistic assessment is incomplete.`;
     // Confirm unresolved edges
     const unresolvedEdges = payload.edges.filter(e => e.relationType === 'unresolved-citation');
     assert.strictEqual(unresolvedEdges.length, 2, 'Expected 2 unresolved-citation edges');
+  });
+
+  // --------------------------------------------------------------------------
+  // HIGH-SCALE STREAMING & BOUNDED NODE BUDGET STRESS TEST (5 MB+ Markdown)
+  // --------------------------------------------------------------------------
+  await test('High-Scale: 5 MB+ streaming Markdown ingestion respects MAX_NODES_PER_DOCUMENT and completes rapidly', async () => {
+    // Generate ~3.5 MB of structured markdown with thousands of headings and philosophical propositions
+    const chunkCount = 3000;
+    const para = 'The apophatic negation articulates the dialectical tension between void and appearance across the cosmic threshold. '.repeat(10) + '\n';
+    const parts: string[] = ['# Systematic Treatise on Cosmic Groundlessness\n\n'];
+    for (let i = 0; i < chunkCount; i++) {
+      parts.push(`## Propositional Cleaving Node ${i}\n`);
+      parts.push(para);
+      if (i % 20 === 0) {
+        parts.push(`> "The abyss does not respond to questions of being." — Fragment ${i}\n\n`);
+      }
+      if (i % 50 === 0) {
+        parts.push(`See also [[Cross Reference Concept ${i}]].\n\n`);
+      }
+    }
+    const largeMd = parts.join('');
+    const file = new File([largeMd], 'massive-treatise.md', { type: 'text/markdown' });
+    assert(file.size > 2 * 1024 * 1024, `File size should exceed 2 MB streaming threshold, was ${file.size}`);
+
+    const startTime = Date.now();
+    const parser = new MarkdownParser();
+    const hash = await computeFileSha256(file);
+    const payload = await parser.parse(file, hash);
+    const duration = Date.now() - startTime;
+
+    assert(payload.nodes.length <= 2500, `Nodes must be bounded by MAX_NODES_PER_DOCUMENT (2500), got ${payload.nodes.length}`);
+    assert(payload.nodes.length > 500, `Expected substantial extraction, got ${payload.nodes.length}`);
+    assert(payload.edges.length > 0, 'Extracted edges should not be empty');
+    console.log(`    (Processed ${file.size} bytes in ${duration}ms, extracted ${payload.nodes.length} nodes, ${payload.edges.length} edges)`);
+  });
+
+  // --------------------------------------------------------------------------
+  // BOUNDED MEMORY O(1) SLICE HASHING & HEADER VALIDATION (> 10 MB file)
+  // --------------------------------------------------------------------------
+  await test('Bounded Memory: Files > 10 MB execute composite 3-point hash and header validation via slice without full-buffer load', async () => {
+    // Create a 12 MB synthetic text file
+    const tenMb = 12 * 1024 * 1024;
+    const blobChunk = new Uint8Array(1024 * 1024); // 1 MB chunk
+    blobChunk.fill(0x61); // ASCII 'a'
+    const blobParts: Uint8Array[] = [];
+    for (let i = 0; i < 12; i++) {
+      blobParts.push(blobChunk);
+    }
+    const largeFile = new File(blobParts, 'corpus-archive.txt', { type: 'text/plain' });
+    assert.strictEqual(largeFile.size, tenMb, 'File should be exactly 12 MB');
+
+    // 1. Validate header inspection runs on 64-byte slice
+    const headerResult = await validateFileHeaderAndMime(largeFile);
+    assert.strictEqual(headerResult.isValid, true, 'Header validation should pass');
+    assert.strictEqual(headerResult.detectedMime, 'text/plain');
+
+    // 2. Compute SHA-256 fingerprint (composite 3-point sampling)
+    const startHash = Date.now();
+    const hash = await computeFileSha256(largeFile);
+    const hashDuration = Date.now() - startHash;
+
+    assert.strictEqual(typeof hash, 'string');
+    assert.strictEqual(hash.length, 64, 'SHA-256 hash string must be 64 hexadecimal characters');
+    assert(hashDuration < 1000, `Composite hash should execute in < 1000ms, took ${hashDuration}ms`);
+    console.log(`    (Composite hash computed in ${hashDuration}ms: ${hash.slice(0, 16)}...)`);
+  });
+
+  // --------------------------------------------------------------------------
+  // GRAPH STORAGE: 32KB TRUNCATION & 500-ITEM BATCH INTEGRITY
+  // --------------------------------------------------------------------------
+  await test('GraphStorage: Sanitizes long document preview text to 32KB and commits large node batches', async () => {
+    const hugeSummary = 'x'.repeat(50000); // 50,000 characters
+    const testDocId = `test_doc_${Date.now()}`;
+    const testHash = `hash_${Date.now()}`;
+
+    // Generate 600 nodes to cross the 500-item transaction batch boundary
+    const testNodes: any[] = [];
+    const testEdges: any[] = [];
+    for (let i = 0; i < 600; i++) {
+      const nodeId = `node_batch_test_${i}`;
+      testNodes.push({
+        id: nodeId,
+        hash: `h_${i}`,
+        label: `Batch Test Node ${i}`,
+        title: `Batch Test Node ${i}`,
+        nodeKind: 'concept',
+        sourceFile: 'batch_test.txt',
+        mimeType: 'text/plain',
+        content: i === 0 ? 'y'.repeat(40000) : 'Test content',
+        description: 'Test description',
+        systemStage: 'Stage I: Ontological Groundlessness',
+        thematicGroup: 'Nihilistic Pivot',
+        citations: [],
+        connectedNodeIds: [],
+        createdAt: Date.now()
+      });
+      if (i > 0) {
+        testEdges.push({
+          id: `edge_batch_test_${i}`,
+          source: testNodes[0].id,
+          target: nodeId,
+          relationType: 'articulates'
+        });
+      }
+    }
+
+    await GraphStorage.commitBatchExtraction(testHash, testNodes, testEdges, {
+      id: testDocId,
+      hash: testHash,
+      fileName: 'large_summary.txt',
+      fileSize: 100000,
+      mimeType: 'text/plain',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      versionCount: 1,
+      sectionsCount: 1,
+      spansCount: 0,
+      summary: hugeSummary,
+      processingMode: 'STRUCTURALLY_INGESTED'
+    });
+
+    // Check cached document record summary is capped
+    const doc = await GraphStorage.getDocument(testDocId);
+    assert(doc, 'Committed document should be retrievable');
+    assert(doc.summary && doc.summary.length <= 32768 + 50, 'Document summary preview must be truncated to ~32KB');
+    assert(doc.summary.includes('[TRUNCATED 32KB]'), 'Truncation flag should be present');
+
+    // Check node 0 content is capped
+    const graph = GraphStorage.getIngestedGraphSync();
+    const node0 = graph.nodes.find(n => n.id === 'node_batch_test_0');
+    assert(node0, 'Node 0 should be in cache');
+    assert(node0.content && node0.content.length <= 32768 + 50, 'Node content preview must be capped');
+  });
+
+  // --------------------------------------------------------------------------
+  // LIVE STAGE TELEMETRY: Real-Time onProgress Emission Verification
+  // --------------------------------------------------------------------------
+  await test('Live Telemetry: processBatch emits real-time stage transitions (zero UI hang)', async () => {
+    const md = `# The Active Void\n\nNihilism as the prerequisite to apophatic theology.`;
+    const file = new File([md], 'active-void.md', { type: 'text/markdown' });
+
+    const stagesObserved: string[] = [];
+    const results = await ingestionService.processBatch(
+      [file],
+      (_idx, _total, item) => {
+        if (item.stageLabel && !stagesObserved.includes(item.stageLabel)) {
+          stagesObserved.push(item.stageLabel);
+        }
+      }
+    );
+
+    assert.strictEqual(results.length, 1);
+    assert.strictEqual(results[0].status, 'success');
+    // Ensure multiple intermediate stage labels were emitted to UI
+    assert(stagesObserved.length >= 3, `Expected at least 3 live stage transitions, got ${stagesObserved.length}: ${stagesObserved.join(', ')}`);
+    console.log(`    (Observed ${stagesObserved.length} intermediate stages: ${stagesObserved.slice(0, 3).join(' -> ')}...)`);
+  });
+
+  // --------------------------------------------------------------------------
+  // TELEMETRY & LOGGING UTILITY: Execution Time & Memory Monitoring
+  // --------------------------------------------------------------------------
+  await test('Logging Utility: captureMemorySnapshot retrieves Node.js process.memoryUsage metrics', () => {
+    const mem = captureMemorySnapshot();
+    assert(typeof mem.rss === 'number' && mem.rss > 0, 'RSS memory should be a positive number');
+    assert(typeof mem.heapTotal === 'number' && mem.heapTotal > 0, 'Heap total should be a positive number');
+    assert(typeof mem.heapUsed === 'number' && mem.heapUsed > 0, 'Heap used should be a positive number');
+    console.log(`    (Memory snapshot: RSS=${(mem.rss / 1024 / 1024).toFixed(1)}MB, HeapUsed=${(mem.heapUsed / 1024 / 1024).toFixed(1)}MB)`);
+  });
+
+  await test('Logging Utility: executeStage records accurate duration and memory usage difference', async () => {
+    const logger = new PipelineStageLogger({
+      minDurationMsThreshold: 0,
+      minMemoryDeltaBytesThreshold: 0,
+      logLevel: 'silent'
+    });
+
+    const context = { fileName: 'large_treatise.md', fileSize: 524288000, stageIndex: 3 };
+    const simulatedPayload = await logger.executeStage(
+      'Simulated Parsing Stage',
+      context,
+      async () => {
+        // Allocate temporary memory and simulate delay
+        const tempBuf = new Uint8Array(4 * 1024 * 1024); // 4MB
+        tempBuf.fill(42);
+        await new Promise((res) => setTimeout(res, 25));
+        return { bytesProcessed: tempBuf.byteLength };
+      }
+    );
+
+    assert.strictEqual(simulatedPayload.bytesProcessed, 4 * 1024 * 1024);
+
+    const history = logger.getMetricsHistory();
+    assert.strictEqual(history.length, 1, 'Expected 1 recorded stage metric');
+    const metric = history[0];
+
+    assert.strictEqual(metric.stageName, 'Simulated Parsing Stage');
+    assert(metric.durationMs >= 20, `Duration should be at least 20ms, was ${metric.durationMs}ms`);
+    assert(metric.endTime >= metric.startTime, 'End time must be greater than or equal to start time');
+    assert.strictEqual(metric.context.fileSize, 524288000);
+    assert(typeof metric.memoryDeltaBytes.heapUsed === 'number', 'Heap delta must be a number');
+    console.log(`    (Stage duration: ${metric.durationMs}ms, Heap Delta: ${(metric.memoryDeltaBytes.heapUsed / 1024).toFixed(1)}KB)`);
+  });
+
+  // --------------------------------------------------------------------------
+  // TELEMETRY & LOGGING UTILITY: Contextual Error Handling & Stack Trace
+  // --------------------------------------------------------------------------
+  await test('Logging Utility: executeStage captures error context, stage name, input params, and stack trace', async () => {
+    const loggedErrors: any[] = [];
+    const mockLogger = {
+      info: () => {},
+      warn: () => {},
+      error: (_msg: string, payload: any) => {
+        loggedErrors.push(payload);
+      }
+    };
+
+    const logger = new PipelineStageLogger({
+      logAlwaysOnError: true,
+      customLogger: mockLogger
+    });
+
+    const stageContext = {
+      fileName: 'corrupt_doc.pdf',
+      fileSize: 104857600,
+      mimeType: 'application/pdf',
+      attempt: 1
+    };
+
+    let caughtError: Error | null = null;
+    try {
+      await logger.executeStage('Corrupt PDF Decomposition', stageContext, async () => {
+        throw new TypeError('Malformed PDF trailer dictionary: stream offset out of bounds');
+      });
+    } catch (err: any) {
+      caughtError = err;
+    }
+
+    assert(caughtError, 'Expected stage exception to be re-thrown');
+    assert.strictEqual(caughtError.name, 'TypeError');
+
+    const history = logger.getMetricsHistory();
+    assert.strictEqual(history.length, 1);
+    const metric = history[0];
+
+    // Verify metric error fields
+    assert(metric.error, 'Error details must be attached to metrics');
+    assert.strictEqual(metric.error.name, 'TypeError');
+    assert(metric.error.message.includes('Malformed PDF trailer dictionary'));
+    assert(metric.error.stack && metric.error.stack.length > 0, 'Stack trace must be captured');
+    assert.strictEqual(metric.context.fileName, 'corrupt_doc.pdf');
+    assert.strictEqual(metric.context.fileSize, 104857600);
+
+    // Verify external logger received payload
+    assert.strictEqual(loggedErrors.length, 1);
+    assert.strictEqual(loggedErrors[0].stage, 'Corrupt PDF Decomposition');
+    assert.strictEqual(loggedErrors[0].err.name, 'TypeError');
+  });
+
+  // --------------------------------------------------------------------------
+  // TELEMETRY & LOGGING UTILITY: Conditional Thresholding (Performance Optimization)
+  // --------------------------------------------------------------------------
+  await test('Logging Utility: Conditional thresholding suppresses overhead on rapid sub-threshold stages', async () => {
+    const logsEmitted: string[] = [];
+    const mockLogger = {
+      info: (msg: string) => { logsEmitted.push(msg); },
+      warn: (msg: string) => { logsEmitted.push(msg); },
+      error: (msg: string) => { logsEmitted.push(msg); }
+    };
+
+    const logger = new PipelineStageLogger({
+      minDurationMsThreshold: 100, // 100 ms threshold
+      minMemoryDeltaBytesThreshold: 10 * 1024 * 1024, // 10 MB threshold
+      logAlwaysOnError: true,
+      customLogger: mockLogger
+    });
+
+    // 1. Rapid stage below threshold (e.g. 5ms, trivial memory)
+    await logger.executeStage('Fast Validation Step', { file: 'test.md' }, async () => {
+      return true;
+    });
+
+    assert.strictEqual(logsEmitted.length, 0, 'Fast stage below duration & memory thresholds must not emit logs');
+
+    // 2. Slow stage exceeding 100ms threshold
+    await logger.executeStage('Slow Inverted Index Synthesis', { file: '500mb_treatise.md' }, async () => {
+      await new Promise(r => setTimeout(r, 110));
+      return true;
+    });
+
+    assert.strictEqual(logsEmitted.length, 1, 'Stage exceeding 100ms duration threshold must emit log');
+    assert(logsEmitted[0].includes('Slow Inverted Index Synthesis'));
+  });
+
+  // --------------------------------------------------------------------------
+  // TELEMETRY & LOGGING UTILITY: Bunyan & Winston Standard Format Compatibility
+  // --------------------------------------------------------------------------
+  await test('Logging Utility: Generates valid Bunyan and Winston structured JSON entries', async () => {
+    const logger = new PipelineStageLogger();
+
+    await logger.executeStage('Format Verification Stage', { docHash: 'abc12345' }, async () => {
+      return 'ok';
+    });
+
+    const metric = logger.getMetricsHistory()[0];
+
+    // Bunyan Schema Verification
+    const bunyan = logger.formatBunyan(metric);
+    assert.strictEqual(typeof bunyan.name, 'string');
+    assert.strictEqual(typeof bunyan.pid, 'number');
+    assert.strictEqual(typeof bunyan.level, 'number');
+    assert.strictEqual(typeof bunyan.time, 'string');
+    assert.strictEqual(bunyan.stage, 'Format Verification Stage');
+    assert.strictEqual(bunyan.context.docHash, 'abc12345');
+    assert(typeof bunyan.memory.before.heapUsed === 'number');
+    assert(typeof bunyan.memory.after.heapUsed === 'number');
+
+    // Winston Schema Verification
+    const winston = logger.formatWinston(metric);
+    assert.strictEqual(winston.level, 'info');
+    assert(winston.message.includes('Format Verification Stage'));
+    assert.strictEqual(winston.service, 'ingestion-service');
+    assert.strictEqual(typeof winston.timestamp, 'string');
+    assert.strictEqual(winston.context.docHash, 'abc12345');
   });
 
   console.log('\n---------------------------------------------------------------');

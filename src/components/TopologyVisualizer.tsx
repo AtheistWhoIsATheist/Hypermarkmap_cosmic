@@ -1,14 +1,17 @@
 /**
  * Journal314 Ω — Nihiltheistic Hypermap Visual (src/components/TopologyVisualizer.tsx)
  * 
- * Production Large-Scale Epistemic Topology Canvas.
+ * Production Large-Scale Epistemic Topology Canvas & Workstation Dashboard.
  * Implements:
- * 1. 4-Tier Semantic Zoom & Level-of-Detail (LoD) state machine (Tiers 0, 1, 2, 3)
- * 2. Vogel's Golden-Angle Phyllotaxis Spiral Packing (constant areal density, zero node stacking)
- * 3. Greedy 2D Screen-Space AABB Label Collision Grid (bounded 55-label frame budget)
- * 4. Compound Supernode Progressive Disclosure & Density Mode Controls (Smart LoD, Architecture, Full Horizon)
- * 5. Parallel Edge Bundling & 1-Hop Ego-Network Spotlight
- * 6. Epistemic Display Label Sanitizer & Defensive Null-Safe Event Handlers
+ * 1. Collapsible Glassmorphic Left Sidebar with CSS Grid & CSS Variable Transition tokens
+ * 2. Viewport Responsiveness: Permanent Grid Column on Desktop, Overlay Drawer on < 1024px screens
+ * 3. 4-Tier Semantic Zoom & Level-of-Detail (LoD) state machine (Tiers 0, 1, 2, 3)
+ * 4. Vogel's Golden-Angle Phyllotaxis Spiral Packing (constant areal density, zero node stacking)
+ * 5. Greedy 2D Screen-Space AABB Label Collision Grid (bounded 55-label frame budget)
+ * 6. Compound Supernode Progressive Disclosure & Density Mode Controls (Smart LoD, Architecture, Full Horizon)
+ * 7. Parallel Edge Bundling & 1-Hop Ego-Network Spotlight
+ * 8. Epistemic Display Label Sanitizer & Defensive Null-Safe Event Handlers
+ * 9. ResizeObserver coupled with canvas viewport buffer invalidation (zero layout thrashing)
  */
 
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
@@ -24,7 +27,11 @@ import {
   Upload,
   Trash2,
   HardDrive,
-  Sliders
+  Sliders,
+  Layers,
+  Compass,
+  FileText,
+  Activity
 } from 'lucide-react';
 import {
   MARKMAP_EPITEMIC_TOPOLOGY,
@@ -51,27 +58,64 @@ import {
   type ScreenRect
 } from '../utils/graphSpatialEngine';
 
-export const TopologyVisualizer: React.FC = () => {
+/**
+ * Universal cross-platform fallback for CanvasRenderingContext2D.roundRect
+ * Prevents runtime crashes on environments lacking native roundRect implementation.
+ */
+function drawRoundRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number
+): void {
+  if (typeof ctx.roundRect === 'function') {
+    ctx.roundRect(x, y, w, h, r);
+  } else {
+    const radius = Math.min(Math.max(0, r), Math.abs(w) / 2, Math.abs(h) / 2);
+    ctx.moveTo(x + radius, y);
+    ctx.arcTo(x + w, y, x + w, y + h, radius);
+    ctx.arcTo(x + w, y + h, x, y + h, radius);
+    ctx.arcTo(x, y + h, x, y, radius);
+    ctx.arcTo(x, y, x + w, y, radius);
+    ctx.closePath();
+  }
+}
+
+export interface TopologyVisualizerProps {
+  initialSidebarOpen?: boolean;
+}
+
+export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
+  initialSidebarOpen = true
+}) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const headerRef = useRef<HTMLElement | null>(null);
-  const [headerHeight, setHeaderHeight] = useState(140);
+  const canvasContainerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animFrameIdRef = useRef<number | null>(null);
 
-  // Measure dynamic header height with defensive observer cleanup
+  // Sidebar Open & Viewport Responsiveness State
+  const [sidebarOpen, setSidebarOpen] = useState(initialSidebarOpen);
+  const [isMobile, setIsMobile] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      return window.innerWidth < 1024;
+    }
+    return false;
+  });
+
+  // Observe screen width for responsive desktop grid vs mobile overlay drawer switch
   useEffect(() => {
-    const header = headerRef.current;
-    if (!header) return;
-    const observer = new ResizeObserver(() => {
-      if (headerRef.current) {
-        setHeaderHeight(headerRef.current.clientHeight);
-      }
-    });
-    observer.observe(header);
-    return () => observer.disconnect();
+    const handleViewportChange = () => {
+      const mobile = window.innerWidth < 1024;
+      setIsMobile(mobile);
+    };
+    window.addEventListener('resize', handleViewportChange);
+    return () => window.removeEventListener('resize', handleViewportChange);
   }, []);
 
   // Fullscreen state listener
+  const [isFullscreen, setIsFullscreen] = useState(false);
   useEffect(() => {
     const update = () => setIsFullscreen(document.fullscreenElement === containerRef.current);
     document.addEventListener('fullscreenchange', update);
@@ -100,7 +144,6 @@ export const TopologyVisualizer: React.FC = () => {
   hoveredNodeIdRef.current = hoveredNodeId;
 
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
   const [isIngestionOpen, setIsIngestionOpen] = useState(false);
   const [isWorkspaceOpen, setIsWorkspaceOpen] = useState(false);
   const [googleUser, setGoogleUser] = useState<User | null>(() => getCurrentUser());
@@ -126,8 +169,8 @@ export const TopologyVisualizer: React.FC = () => {
     });
   }, []);
 
-  const handleIngestionComplete = useCallback((_items?: IngestionBatchItem[]) => {
-    const updated = GraphStorage.getIngestedGraphSync();
+  const handleIngestionComplete = useCallback(async (_items?: IngestionBatchItem[]) => {
+    const updated = await GraphStorage.getIngestedGraph();
     setIngestedGraph(updated);
   }, []);
 
@@ -183,9 +226,27 @@ export const TopologyVisualizer: React.FC = () => {
   const getCanvasRectDefensive = useCallback((): DOMRect | null => {
     const canvas = canvasRef.current;
     if (!canvas) return null;
-    const rect = canvas.getBoundingClientRect();
-    if (!rect || rect.width <= 0 || rect.height <= 0) return null;
-    return rect;
+    try {
+      const rect = canvas.getBoundingClientRect();
+      if (rect && rect.width > 0 && rect.height > 0) {
+        return rect;
+      }
+    } catch {
+      // In detached or test environments, getBoundingClientRect may throw
+    }
+    const width = canvas.clientWidth || (typeof window !== 'undefined' ? window.innerWidth : 1200);
+    const height = canvas.clientHeight || (typeof window !== 'undefined' ? window.innerHeight : 800);
+    return {
+      left: 0,
+      top: 0,
+      right: width,
+      bottom: height,
+      width,
+      height,
+      x: 0,
+      y: 0,
+      toJSON: () => ({})
+    };
   }, []);
 
   // Initialize Deep Starfield & Nebula Clusters
@@ -224,7 +285,6 @@ export const TopologyVisualizer: React.FC = () => {
   }, [viewport.scale]);
 
   // 2. Active ViewGraph Projection via Pure Spatial Engine
-  // Note: Only re-evaluates when discrete currentLoDTier changes (0, 1, 2, 3), not on micro-scale deltas
   const viewGraph = useMemo(() => {
     return projectViewGraph({
       treeData,
@@ -362,16 +422,19 @@ export const TopologyVisualizer: React.FC = () => {
 
       setViewport((prev) => ({
         ...prev,
-        x: prev.x + dx,
-        y: prev.y + dy
+        x: Number.isFinite(prev.x + dx) ? prev.x + dx : prev.x,
+        y: Number.isFinite(prev.y + dy) ? prev.y + dy : prev.y
       }));
     } else {
       // Hover detection for 1-hop Ego-Network Spotlight
       const canvasX = e.clientX - rect.left;
       const canvasY = e.clientY - rect.top;
       const vp = viewportRef.current;
-      const worldX = (canvasX - vp.x) / vp.scale;
-      const worldY = (canvasY - vp.y) / vp.scale;
+      const safeScale = Number.isFinite(vp.scale) && vp.scale > 0 ? vp.scale : 0.85;
+      const safeX = Number.isFinite(vp.x) ? vp.x : 0;
+      const safeY = Number.isFinite(vp.y) ? vp.y : 0;
+      const worldX = (canvasX - safeX) / safeScale;
+      const worldY = (canvasY - safeY) / safeScale;
 
       let hitId: string | null = null;
       const currentNodes = layoutTreeRef.current;
@@ -414,10 +477,16 @@ export const TopologyVisualizer: React.FC = () => {
     const mouseY = e.clientY - rect.top;
 
     setViewport((prev) => {
-      const newScale = Math.min(Math.max(prev.scale * zoomFactor, 0.15), 3.8);
-      const newX = mouseX - (mouseX - prev.x) * (newScale / prev.scale);
-      const newY = mouseY - (mouseY - prev.y) * (newScale / prev.scale);
-      return { x: newX, y: newY, scale: newScale };
+      const currentScale = Number.isFinite(prev.scale) && prev.scale > 0 ? prev.scale : 0.85;
+      const newScale = Math.min(Math.max(currentScale * zoomFactor, 0.15), 3.8);
+      const ratio = newScale / currentScale;
+      const newX = mouseX - (mouseX - prev.x) * ratio;
+      const newY = mouseY - (mouseY - prev.y) * ratio;
+      return {
+        x: Number.isFinite(newX) ? newX : prev.x,
+        y: Number.isFinite(newY) ? newY : prev.y,
+        scale: newScale
+      };
     });
   }, [getCanvasRectDefensive]);
 
@@ -452,7 +521,6 @@ export const TopologyVisualizer: React.FC = () => {
     }
 
     if (found) {
-      // If user clicked a cluster hub, toggle its local expansion while inspecting
       if (found.isClusterHub && (found.childCount || 0) > 0) {
         handleToggleClusterExpansion(found.id);
       }
@@ -467,34 +535,47 @@ export const TopologyVisualizer: React.FC = () => {
   const handleResetView = useCallback(() => {
     const canvas = canvasRef.current;
     const nodes = layoutTreeRef.current;
-    if (!canvas || !nodes.length) return;
+    if (!canvas || !nodes || nodes.length === 0) return;
     const rect = getCanvasRectDefensive();
     const clientWidth = rect?.width || canvas.clientWidth || (typeof window !== 'undefined' ? window.innerWidth : 1200);
     const clientHeight = rect?.height || canvas.clientHeight || (typeof window !== 'undefined' ? window.innerHeight : 800);
-    if (clientWidth <= 0 || clientHeight <= 0) return;
+    if (!Number.isFinite(clientWidth) || !Number.isFinite(clientHeight) || clientWidth <= 0 || clientHeight <= 0) return;
 
-    const minX = Math.min(...nodes.map((n) => n.x)) - 80;
-    const maxX = Math.max(...nodes.map((n) => n.x)) + 180;
-    const minY = Math.min(...nodes.map((n) => n.y)) - 80;
-    const maxY = Math.max(...nodes.map((n) => n.y)) + 80;
-    const height = Math.max(160, clientHeight - headerHeight - 100);
-    const scale = Math.max(
-      0.15,
-      Math.min(0.85, (clientWidth - 48) / (maxX - minX), height / (maxY - minY))
-    );
+    const validNodes = nodes.filter((n) => Number.isFinite(n.x) && Number.isFinite(n.y));
+    if (validNodes.length === 0) return;
+
+    const xs = validNodes.map((n) => n.x);
+    const ys = validNodes.map((n) => n.y);
+    const minX = Math.min(...xs) - 80;
+    const maxX = Math.max(...xs) + 180;
+    const minY = Math.min(...ys) - 80;
+    const maxY = Math.max(...ys) + 80;
+
+    const spanX = Math.max(120, maxX - minX);
+    const spanY = Math.max(120, maxY - minY);
+    const height = Math.max(160, clientHeight - 80);
+    const scaleX = (clientWidth - 48) / spanX;
+    const scaleY = height / spanY;
+    const rawScale = Math.min(scaleX, scaleY);
+    const safeScale = Number.isFinite(rawScale) && rawScale > 0
+      ? Math.max(0.15, Math.min(0.85, rawScale))
+      : 0.85;
+
+    const targetX = clientWidth / 2 - ((minX + maxX) / 2) * safeScale;
+    const targetY = clientHeight / 2 - ((minY + maxY) / 2) * safeScale;
+
     setViewport({
-      x: clientWidth / 2 - ((minX + maxX) / 2) * scale,
-      y: headerHeight + 40 + height / 2 - ((minY + maxY) / 2) * scale,
-      scale
+      x: Number.isFinite(targetX) ? targetX : clientWidth / 2.8,
+      y: Number.isFinite(targetY) ? targetY : clientHeight / 2.2,
+      scale: safeScale
     });
-  }, [getCanvasRectDefensive, headerHeight]);
+  }, [getCanvasRectDefensive]);
 
   useEffect(() => {
     handleResetView();
   }, [handleResetView]);
 
   const handleExpandAll = () => {
-    // Expand all baseline nodes
     const toggle = (node: EpistemicTopologyNode): EpistemicTopologyNode => ({
       ...node,
       _collapsed: false,
@@ -502,7 +583,6 @@ export const TopologyVisualizer: React.FC = () => {
     });
     setTreeData(toggle(treeData));
 
-    // Expand all document and section clusters
     const allHubIds = new Set<string>();
     ingestedGraph.nodes.forEach((n) => {
       if (n.nodeKind === 'document-hub' || n.nodeKind === 'section') {
@@ -513,19 +593,16 @@ export const TopologyVisualizer: React.FC = () => {
   };
 
   const handleCollapseAll = () => {
-    // Collapse baseline tree to root
     const toggle = (node: EpistemicTopologyNode, depth: number = 0): EpistemicTopologyNode => ({
       ...node,
       _collapsed: depth >= 1,
       children: node.children ? node.children.map((c) => toggle(c, depth + 1)) : undefined
     });
     setTreeData(toggle(treeData, 0));
-
-    // Fold all document clusters cleanly back into supernodes
     setExpandedClusterIds(new Set());
   };
 
-  // Main Canvas Render Loop (60 FPS Performance Pipeline)
+  // Main Canvas Render Loop (60 FPS Performance Pipeline) coupled with container ResizeObserver
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -536,20 +613,27 @@ export const TopologyVisualizer: React.FC = () => {
     let lastFrame = 0;
 
     const handleResize = () => {
-      const parent = canvas.parentElement;
+      const parent = canvasContainerRef.current || canvas.parentElement;
       if (!parent) return;
-      const pWidth = parent.clientWidth;
-      const pHeight = parent.clientHeight;
+      const pWidth = parent.clientWidth || canvas.clientWidth || (typeof window !== 'undefined' ? window.innerWidth : 1200);
+      const pHeight = parent.clientHeight || canvas.clientHeight || (typeof window !== 'undefined' ? window.innerHeight : 800);
       if (pWidth <= 0 || pHeight <= 0) return;
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      canvas.width = pWidth * dpr;
-      canvas.height = pHeight * dpr;
+      const targetW = Math.floor(pWidth * dpr);
+      const targetH = Math.floor(pHeight * dpr);
+      if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW;
+        canvas.height = targetH;
+      }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     };
 
     handleResize();
+
     const resizeObserver = new ResizeObserver(handleResize);
-    if (canvas.parentElement) {
+    if (canvasContainerRef.current) {
+      resizeObserver.observe(canvasContainerRef.current);
+    } else if (canvas.parentElement) {
       resizeObserver.observe(canvas.parentElement);
     }
     window.addEventListener('resize', handleResize);
@@ -568,26 +652,31 @@ export const TopologyVisualizer: React.FC = () => {
       const activeEdges = bundledEdgesRef.current;
       const activeHoverId = hoveredNodeIdRef.current;
 
-      const width = canvas.clientWidth;
-      const height = canvas.clientHeight;
+      const width = canvas.clientWidth || canvas.parentElement?.clientWidth || (typeof window !== 'undefined' ? window.innerWidth : 1200);
+      const height = canvas.clientHeight || canvas.parentElement?.clientHeight || (typeof window !== 'undefined' ? window.innerHeight : 800);
       if (width <= 0 || height <= 0) {
         animFrameIdRef.current = requestAnimationFrame(render);
         return;
       }
 
-      const lodTier = getLoDTier(vp.scale);
+      const safeScale = Number.isFinite(vp.scale) && vp.scale > 0 ? vp.scale : 0.85;
+      const safeX = Number.isFinite(vp.x) ? vp.x : width / 2.8;
+      const safeY = Number.isFinite(vp.y) ? vp.y : height / 2.2;
+      const lodTier = getLoDTier(safeScale);
 
       ctx.save();
       ctx.clearRect(0, 0, width, height);
 
-      // 1. Deep Void Base Gradient
+      // 1. Deep Void Base Gradient (strictly bounded to positive finite radii)
+      const maxDim = Math.max(width, height, 100);
+      const innerR = Math.min(50, maxDim * 0.1);
       const baseGrad = ctx.createRadialGradient(
         width / 2,
         height / 2,
-        50,
+        innerR,
         width / 2,
         height / 2,
-        Math.max(width, height)
+        maxDim
       );
       baseGrad.addColorStop(0, '#040714');
       baseGrad.addColorStop(0.5, '#02030a');
@@ -597,9 +686,12 @@ export const TopologyVisualizer: React.FC = () => {
 
       // 2. Render Ambient Nebula Clouds
       nebulaCloudsRef.current.forEach((nebula) => {
-        const screenX = vp.x + nebula.x * vp.scale * 0.35;
-        const screenY = vp.y + nebula.y * vp.scale * 0.35;
-        const screenR = nebula.radius * vp.scale;
+        const screenX = safeX + nebula.x * safeScale * 0.35;
+        const screenY = safeY + nebula.y * safeScale * 0.35;
+        const screenR = nebula.radius * safeScale;
+        if (!Number.isFinite(screenX) || !Number.isFinite(screenY) || !Number.isFinite(screenR) || screenR <= 1) {
+          return;
+        }
         if (
           screenX + screenR < 0 ||
           screenX - screenR > width ||
@@ -619,8 +711,10 @@ export const TopologyVisualizer: React.FC = () => {
 
       // 3. Render Twinkling Multi-Spectral Starfield
       starsRef.current.forEach((star) => {
-        const sx = vp.x + star.x * vp.scale * 0.55;
-        const sy = vp.y + star.y * vp.scale * 0.55;
+        const sx = safeX + star.x * safeScale * 0.55;
+        const sy = safeY + star.y * safeScale * 0.55;
+        const starR = star.size * Math.max(0.6, safeScale * 0.9);
+        if (!Number.isFinite(sx) || !Number.isFinite(sy) || !Number.isFinite(starR) || starR <= 0) return;
         if (sx < 0 || sx > width || sy < 0 || sy > height) return;
 
         const pulse = Math.sin(t * star.speed * 60 + star.phase);
@@ -629,15 +723,15 @@ export const TopologyVisualizer: React.FC = () => {
         ctx.fillStyle = star.color;
         ctx.globalAlpha = alpha;
         ctx.beginPath();
-        ctx.arc(sx, sy, star.size * Math.max(0.6, vp.scale * 0.9), 0, Math.PI * 2);
+        ctx.arc(sx, sy, starR, 0, Math.PI * 2);
         ctx.fill();
       });
       ctx.globalAlpha = 1.0;
 
       // 4. World-Space Coordinate Transform
       ctx.save();
-      ctx.translate(vp.x, vp.y);
-      ctx.scale(vp.scale, vp.scale);
+      ctx.translate(safeX, safeY);
+      ctx.scale(safeScale, safeScale);
 
       // 5. Render 3D Torus Geometric Wireframe (Central Baseline Void)
       ctx.save();
@@ -649,7 +743,7 @@ export const TopologyVisualizer: React.FC = () => {
       const rotX = 0.55 + Math.sin(t * 0.07) * 0.08;
 
       ctx.strokeStyle = 'rgba(0, 240, 255, 0.10)';
-      ctx.lineWidth = 1 / vp.scale;
+      ctx.lineWidth = Math.max(0.5, 1 / safeScale);
 
       for (let i = 0; i < rings; i++) {
         const u = (i / rings) * Math.PI * 2;
@@ -690,6 +784,7 @@ export const TopologyVisualizer: React.FC = () => {
       activeNodes.forEach((node) => {
         if (!node.parent) return;
         const p = node.parent;
+        if (!Number.isFinite(node.x) || !Number.isFinite(node.y) || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return;
 
         const isHighlighted =
           node.isMatch ||
@@ -713,7 +808,7 @@ export const TopologyVisualizer: React.FC = () => {
         ctx.moveTo(p.x, p.y);
         ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, node.x, node.y);
         ctx.strokeStyle = isHighlighted ? 'rgba(0, 240, 255, 0.9)' : 'rgba(56, 189, 248, 0.28)';
-        ctx.lineWidth = (isHighlighted ? 3.2 : 1.6) / vp.scale;
+        ctx.lineWidth = (isHighlighted ? 3.2 : 1.6) / safeScale;
         ctx.stroke();
 
         if (isHighlighted) {
@@ -721,7 +816,7 @@ export const TopologyVisualizer: React.FC = () => {
           ctx.moveTo(p.x, p.y);
           ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, node.x, node.y);
           ctx.strokeStyle = '#ffffff';
-          ctx.lineWidth = 1.2 / vp.scale;
+          ctx.lineWidth = 1.2 / safeScale;
           ctx.stroke();
         }
       });
@@ -732,6 +827,14 @@ export const TopologyVisualizer: React.FC = () => {
       culler.reset(width, height, 55);
 
       activeEdges.forEach((edge) => {
+        if (
+          !Number.isFinite(edge.sourceX) ||
+          !Number.isFinite(edge.sourceY) ||
+          !Number.isFinite(edge.targetX) ||
+          !Number.isFinite(edge.targetY)
+        )
+          return;
+
         const isHighlighted =
           edge.isHighlighted ||
           (activeSpotlightId &&
@@ -755,14 +858,14 @@ export const TopologyVisualizer: React.FC = () => {
         ctx.moveTo(edge.sourceX, edge.sourceY);
         ctx.quadraticCurveTo(ctrlX, ctrlY, edge.targetX, edge.targetY);
 
-        // Bundle thickness: clamp(1.5 + log2(bundleCount), 1.5, 7)
         const baseWidth = edge.isMetaEdge
           ? Math.min(6, 1.4 + Math.log2(edge.bundleCount + 1))
           : 1.4;
-        const strokeW = (isHighlighted ? baseWidth * 1.6 : baseWidth) / vp.scale;
+        const strokeW = (isHighlighted ? baseWidth * 1.6 : baseWidth) / safeScale;
 
         if (edge.relationType === 'proposed-contradiction' || edge.relationType === 'contradicts') {
-          ctx.setLineDash([5 / vp.scale, 5 / vp.scale]);
+          const dash = Math.max(1, 5 / safeScale);
+          ctx.setLineDash([dash, dash]);
           ctx.strokeStyle = isHighlighted ? 'rgba(244, 63, 94, 0.95)' : 'rgba(244, 63, 94, 0.7)';
         } else if (edge.edgeCategory === 'philosophical') {
           ctx.setLineDash([]);
@@ -777,10 +880,6 @@ export const TopologyVisualizer: React.FC = () => {
         ctx.setLineDash([]);
 
         // Meta-Edge Badge: Visibility based on Semantic Zoom Tier
-        // Tier 0: Suppress all edge labels completely
-        // Tier 1: Render meta-edge bundle pills, hide predicates unless highlighted
-        // Tier 2: Render meta-edge bundle pills, edge relation labels only if highlighted
-        // Tier 3: Render collision-culled relation predicates (develops, interprets, contradicts, inverts)
         const shouldShowEdgeLabel =
           lodTier >= 3
             ? true
@@ -791,8 +890,8 @@ export const TopologyVisualizer: React.FC = () => {
             ? `${edge.bundleCount} links`
             : edge.relationType || `${edge.bundleCount} links`;
 
-          const screenCtrlX = vp.x + ctrlX * vp.scale;
-          const screenCtrlY = vp.y + ctrlY * vp.scale;
+          const screenCtrlX = safeX + ctrlX * safeScale;
+          const screenCtrlY = safeY + ctrlY * safeScale;
 
           if (culler.isInFrustum(screenCtrlX, screenCtrlY)) {
             const fontPx = 10;
@@ -819,10 +918,10 @@ export const TopologyVisualizer: React.FC = () => {
                 : edge.relationType === 'contradicts'
                 ? 'rgba(244, 63, 94, 0.6)'
                 : 'rgba(148, 163, 184, 0.35)';
-              ctx.lineWidth = 1 / vp.scale;
+              ctx.lineWidth = 1 / safeScale;
 
               ctx.beginPath();
-              ctx.roundRect(ctrlX - textW / 2 - padX, ctrlY - 7 - padY, textW + padX * 2, 14 + padY * 2, 4);
+              drawRoundRect(ctx, ctrlX - textW / 2 - padX, ctrlY - 7 - padY, textW + padX * 2, 14 + padY * 2, 4);
               ctx.fill();
               ctx.stroke();
 
@@ -841,7 +940,7 @@ export const TopologyVisualizer: React.FC = () => {
       });
       ctx.globalAlpha = 1.0;
 
-      // 9. Greedy 2D Screen-Space AABB Label Collision Pass for Nodes
+      // 9. Semantic Zoom Label Allocation & Collision Avoidance Grid
       const candidates: Array<{
         node: PositionedVisualNode;
         screenX: number;
@@ -851,40 +950,44 @@ export const TopologyVisualizer: React.FC = () => {
       }> = [];
 
       activeNodes.forEach((node) => {
-        const sx = vp.x + node.x * vp.scale;
-        const sy = vp.y + node.y * vp.scale;
-        const sr = (node.radius || 12) * vp.scale;
+        if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
+        const sx = safeX + node.x * safeScale;
+        const sy = safeY + node.y * safeScale;
+        const sr = (node.radius || 12) * safeScale;
 
-        // Viewport frustum culling
+        // Frustum Culling
         if (!culler.isInFrustum(sx, sy)) {
           node.canRenderLabel = false;
           return;
         }
 
-        // Semantic Zoom Tier Filtering
+        // Tier-Based Progressive Label Disclosure
         let shouldRenderLabel = false;
-        let maxChars = 28;
+        let maxChars = 26;
 
-        if (node.id === activeSpotlightId || node.isMatch) {
-          shouldRenderLabel = true;
-          maxChars = 48;
-        } else if (lodTier === 0) {
-          // Tier 0: Macro Constellation -> Only Document Hubs and Major Stage Hubs
-          shouldRenderLabel = node.isClusterHub || (node.level !== undefined && node.level <= 1);
-          maxChars = 24;
-        } else if (lodTier === 1) {
-          // Tier 1: Structural Meso -> Document Hubs, Sections, Baseline nodes, high-degree concepts
-          shouldRenderLabel =
+        if (lodTier === 0) {
+          shouldRenderLabel = Boolean(
+            node.isMatch ||
+            node.id === activeSpotlightId ||
+            (node.level !== undefined && node.level <= 1) ||
             node.isClusterHub ||
+            node.isFolded ||
+            node.nodeKind === 'document-hub'
+          );
+          maxChars = 20;
+        } else if (lodTier === 1) {
+          shouldRenderLabel = Boolean(
+            node.isMatch ||
+            node.id === activeSpotlightId ||
             (node.level !== undefined && node.level <= 2) ||
-            (node.degree || 0) >= 3;
+            node.isClusterHub ||
+            (node.degree || 0) >= 3
+          );
           maxChars = 28;
         } else if (lodTier === 2) {
-          // Tier 2: Conceptual Micro -> Reveal Concepts and Propositions
           shouldRenderLabel = true;
           maxChars = 34;
         } else {
-          // Tier 3: Deep Epistemic Inspection -> Full titles
           shouldRenderLabel = true;
           maxChars = 54;
         }
@@ -920,7 +1023,7 @@ export const TopologyVisualizer: React.FC = () => {
           Math.min(
             14,
             (c.node.level !== undefined && c.node.level <= 1 ? 13 : 11) *
-              Math.min(1.2, Math.max(0.85, vp.scale))
+              Math.min(1.2, Math.max(0.85, safeScale))
           )
         );
         const labelWidthPx = c.displayLabel.length * fontSizePx * 0.58 + 14;
@@ -939,7 +1042,8 @@ export const TopologyVisualizer: React.FC = () => {
 
       // 10. Render Luminous Nodes & Optical Glyphs
       activeNodes.forEach((node) => {
-        const radius = node.radius || 12;
+        if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
+        const radius = Math.max(2, node.radius || 12);
         const isSelected = selectedNode && selectedNode.id === node.id;
         const isHovered = activeHoverId === node.id;
         const isMatch = node.isMatch;
@@ -969,22 +1073,25 @@ export const TopologyVisualizer: React.FC = () => {
         }
 
         // Luminous Glow Radial Gradient
-        const glowR = radius * (isSelected ? 3.8 : isHovered ? 3.0 : 2.4);
-        const glow = ctx.createRadialGradient(
-          node.x,
-          node.y,
-          radius * 0.2,
-          node.x,
-          node.y,
-          glowR
-        );
-        glow.addColorStop(0, node.color || '#00f0ff');
-        glow.addColorStop(0.4, node.glowColor || 'rgba(56, 189, 248, 0.4)');
-        glow.addColorStop(1, 'transparent');
-        ctx.fillStyle = glow;
-        ctx.beginPath();
-        ctx.arc(node.x, node.y, glowR, 0, Math.PI * 2);
-        ctx.fill();
+        const glowR = Math.max(radius * 1.1, radius * (isSelected ? 3.8 : isHovered ? 3.0 : 2.4));
+        const innerGlow = Math.max(0.1, radius * 0.2);
+        if (Number.isFinite(glowR) && glowR > innerGlow) {
+          const glow = ctx.createRadialGradient(
+            node.x,
+            node.y,
+            innerGlow,
+            node.x,
+            node.y,
+            glowR
+          );
+          glow.addColorStop(0, node.color || '#00f0ff');
+          glow.addColorStop(0.4, node.glowColor || 'rgba(56, 189, 248, 0.4)');
+          glow.addColorStop(1, 'transparent');
+          ctx.fillStyle = glow;
+          ctx.beginPath();
+          ctx.arc(node.x, node.y, glowR, 0, Math.PI * 2);
+          ctx.fill();
+        }
 
         // Node Solid Core Orb
         ctx.beginPath();
@@ -996,7 +1103,7 @@ export const TopologyVisualizer: React.FC = () => {
           : isMatch
           ? '#f43f5e'
           : (node.glowColor || '#38bdf8');
-        ctx.lineWidth = (isSelected ? 3.5 : isHovered ? 2.5 : 1.5) / vp.scale;
+        ctx.lineWidth = (isSelected ? 3.5 : isHovered ? 2.5 : 1.5) / safeScale;
         ctx.stroke();
 
         // Compound Supernode Folded Child Count Badge (+N items)
@@ -1011,10 +1118,10 @@ export const TopologyVisualizer: React.FC = () => {
 
           ctx.fillStyle = 'rgba(6, 78, 59, 0.9)';
           ctx.strokeStyle = 'rgba(52, 211, 153, 0.8)';
-          ctx.lineWidth = 1 / vp.scale;
+          ctx.lineWidth = 1 / safeScale;
 
           ctx.beginPath();
-          ctx.roundRect(bx - bw / 2 - 5, by - 7, bw + 10, 14, 4);
+          drawRoundRect(ctx, bx - bw / 2 - 5, by - 7, bw + 10, 14, 4);
           ctx.fill();
           ctx.stroke();
 
@@ -1073,313 +1180,489 @@ export const TopologyVisualizer: React.FC = () => {
     };
   }, [viewGraph, selectedNode]);
 
+  // Compute matching count for search bar feedback
+  const searchMatchCount = useMemo(() => {
+    if (!searchQuery.trim()) return 0;
+    return layoutTree.filter((n) => n.isMatch).length;
+  }, [layoutTree, searchQuery]);
+
   return (
     <div
       ref={containerRef}
       className={`relative w-full h-full min-h-screen overflow-hidden select-none font-sans bg-black ${
-        isFullscreen ? 'fixed inset-0 z-50' : 'w-screen h-screen'
+        isFullscreen ? 'fixed inset-0 z-50' : 'w-full h-full'
       }`}
+      style={{
+        display: isMobile ? 'block' : 'grid',
+        gridTemplateColumns: isMobile ? undefined : 'var(--sidebar-width, 320px) 1fr',
+        transition: 'grid-template-columns 250ms cubic-bezier(0.4, 0, 0.2, 1)',
+        ['--sidebar-width' as any]: sidebarOpen ? '320px' : '0px'
+      }}
     >
-      {/* 1. Full-Viewport Cosmic Canvas */}
-      <canvas
-        ref={canvasRef}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerCancel={handlePointerUp}
-        onClick={handleCanvasClick}
-        data-node-count={layoutTree.length}
-        tabIndex={0}
-        aria-label="Interactive topology graph. Enter inspects the root, arrow keys pan, plus and minus zoom, Home resets, Escape closes the inspector."
-        onKeyDown={(event) => {
-          if (event.key === 'Enter') {
-            setSelectedNode(layoutTree[0]);
-            setDrawerOpen(true);
-          } else if (event.key === 'Escape') {
-            setDrawerOpen(false);
-          } else if (event.key === 'Home') {
-            event.preventDefault();
-            handleResetView();
-          } else if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
-            event.preventDefault();
-            setViewport((v) => ({
-              ...v,
-              x: v.x + (event.key === 'ArrowLeft' ? 30 : event.key === 'ArrowRight' ? -30 : 0),
-              y: v.y + (event.key === 'ArrowUp' ? 30 : event.key === 'ArrowDown' ? -30 : 0)
-            }));
-          } else if (['+', '=', '-'].includes(event.key)) {
-            event.preventDefault();
-            setViewport((v) => ({
-              ...v,
-              scale: Math.min(3.8, Math.max(0.15, v.scale * (event.key === '-' ? 0.89 : 1.12)))
-            }));
+      {/* Mobile Backdrop Overlay */}
+      {isMobile && sidebarOpen && (
+        <div
+          onClick={() => setSidebarOpen(false)}
+          className="fixed inset-0 z-30 bg-black/70 backdrop-blur-sm transition-opacity"
+          aria-hidden="true"
+        />
+      )}
+
+      {/* 1. Collapsible Glassmorphic Left Sidebar */}
+      <aside
+        className={`
+          ${
+            isMobile
+              ? `fixed inset-y-0 left-0 z-40 w-[320px] max-w-[85vw] shadow-2xl transition-transform duration-250 ease-in-out ${
+                  sidebarOpen ? 'translate-x-0' : '-translate-x-full'
+                }`
+              : `relative z-20 h-full overflow-hidden transition-all duration-250 ease-in-out ${
+                  sidebarOpen ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
+                }`
           }
-        }}
-        style={{ touchAction: 'none' }}
-        className="w-full h-full cursor-grab active:cursor-grabbing block focus-visible:outline focus-visible:outline-cyan-400"
-      />
-
-      {/* 2. Floating Holographic Header Panel */}
-      <header
-        ref={headerRef}
-        className="absolute top-4 left-4 right-4 sm:right-auto sm:max-w-3xl z-30 p-4 rounded-xl border backdrop-blur-xl transition-all duration-300 pointer-events-auto"
-        style={{
-          backgroundColor: 'rgba(4, 8, 22, 0.8)',
-          borderColor: 'rgba(56, 189, 248, 0.75)',
-          boxShadow: '0 0 25px rgba(0, 240, 255, 0.25), inset 0 0 16px rgba(139, 92, 246, 0.2)'
-        }}
+          flex flex-col bg-slate-950/85 backdrop-blur-md border-r border-slate-800/80 text-slate-100
+        `}
+        style={!isMobile ? { width: 'var(--sidebar-width, 320px)' } : undefined}
       >
-        <div className="flex flex-col space-y-2.5">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <h1 className="text-lg sm:text-xl font-bold tracking-wide text-white drop-shadow-[0_0_12px_rgba(0,240,255,0.7)] flex items-center gap-2">
-                <Sparkles className="w-5 h-5 text-cyan-400 animate-pulse" />
-                <span>JOURNAL314 Ω — Nihiltheistic Hypermap Visual</span>
-              </h1>
-              <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-cyan-300/90 tracking-wider mt-0.5">
-                <span>{layoutTree.length} visible nodes</span>
-                <span>•</span>
-                <span className="text-slate-400">
-                  {ingestedGraph.nodes.length > 0
-                    ? `${50 + ingestedGraph.nodes.length} total in corpus`
-                    : '50 baseline nodes'}
-                </span>
-                {ingestedGraph.nodes.length > 0 && (
-                  <span className="text-emerald-400">
-                    (+{ingestedGraph.nodes.length} from{' '}
-                    {new Set(ingestedGraph.nodes.map((n) => n.sourceFile)).size} docs)
-                  </span>
-                )}
-                <span
-                  className="px-2 py-0.5 rounded bg-cyan-950/80 border border-cyan-800/50 text-[10px] text-cyan-300 font-mono"
-                  title={LOD_TIER_LABELS[currentLoDTier].description}
-                >
-                  {LOD_TIER_LABELS[currentLoDTier].name}
-                </span>
+        <div className="w-[320px] min-w-[320px] h-full flex flex-col overflow-hidden">
+          {/* Sidebar Header & Brand Telemetry */}
+          <div className="p-4 border-b border-slate-800/80 bg-slate-950/90 flex flex-col gap-1.5 flex-shrink-0">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-7 h-7 rounded-lg bg-cyan-950/80 border border-cyan-500/50 flex items-center justify-center shadow-[0_0_12px_rgba(0,240,255,0.3)]">
+                  <Sparkles className="w-4 h-4 text-cyan-400 animate-pulse" />
+                </div>
+                <div>
+                  <h1 className="text-sm font-bold tracking-wide text-white drop-shadow-[0_0_8px_rgba(0,240,255,0.5)]">
+                    JOURNAL314 Ω
+                  </h1>
+                  <p className="text-[10px] text-cyan-400/80 font-mono tracking-wider">
+                    Nihiltheistic Hypermap
+                  </p>
+                </div>
               </div>
-            </div>
-
-            {/* Ingestion & Workspace Trigger Controls */}
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setIsWorkspaceOpen(true)}
-                className="px-3 py-1.5 rounded-lg text-xs font-semibold text-blue-200 border transition-all duration-200 hover:text-white flex items-center gap-1.5 active:scale-95 cursor-pointer"
-                style={{
-                  backgroundColor: 'rgba(30, 58, 138, 0.75)',
-                  borderColor: 'rgba(96, 165, 250, 0.8)',
-                  boxShadow: '0 0 12px rgba(59, 130, 246, 0.35)'
-                }}
-                title="Google Drive & Google Docs Hub"
-              >
-                <HardDrive className="w-3.5 h-3.5 text-blue-400" />
-                <span>Drive & Docs</span>
-                {googleUser && (
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_#34d399]" />
-                )}
-              </button>
-
-              <button
-                onClick={() => setIsIngestionOpen(true)}
-                className="px-3 py-1.5 rounded-lg text-xs font-semibold text-emerald-200 border transition-all duration-200 hover:text-white flex items-center gap-1.5 active:scale-95 cursor-pointer"
-                style={{
-                  backgroundColor: 'rgba(6, 78, 59, 0.75)',
-                  borderColor: 'rgba(52, 211, 153, 0.8)',
-                  boxShadow: '0 0 12px rgba(16, 185, 129, 0.35)'
-                }}
-                title="Ingest philosophical writings (Markdown, Text, PDF, JSON, CSV)"
-              >
-                <Upload className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Ingest Documents</span>
-              </button>
-
-              {ingestedGraph.nodes.length > 0 && (
-                <button
-                  onClick={handleClearIngested}
-                  className="p-1.5 rounded-lg text-xs font-medium text-rose-300 border border-rose-500/40 bg-rose-950/40 hover:bg-rose-900/60 transition active:scale-95 cursor-pointer"
-                  title="Clear Ingested Graph"
-                >
-                  <Trash2 className="w-3.5 h-3.5 text-rose-400" />
-                </button>
-              )}
+              <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-medium bg-cyan-950/60 border border-cyan-800/60 text-cyan-300">
+                v2.6 Ω
+              </span>
             </div>
           </div>
 
-          {/* Density Mode Selector, Collapse/Expand, and Search */}
-          <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-slate-800/80">
-            {/* Density / Level of Detail Mode Segmented Switch */}
-            <div className="flex items-center gap-1 bg-slate-950/90 p-1 rounded-lg border border-slate-800 text-[11px] font-mono">
-              <span className="text-slate-400 px-1.5 flex items-center gap-1">
-                <Sliders className="w-3 h-3 text-cyan-400" /> Mode:
-              </span>
-              <button
-                type="button"
-                onClick={() => setDensityMode('smart')}
-                className={`px-2.5 py-1 rounded transition ${
-                  densityMode === 'smart'
-                    ? 'bg-cyan-950 text-cyan-300 border border-cyan-700/60 font-semibold shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-                title="Auto Progressive Disclosure with Semantic Zoom"
-              >
-                Smart LoD
-              </button>
-              <button
-                type="button"
-                onClick={() => setDensityMode('architecture')}
-                className={`px-2.5 py-1 rounded transition ${
-                  densityMode === 'architecture'
-                    ? 'bg-purple-950 text-purple-300 border border-purple-700/60 font-semibold shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-                title="Baseline + Document Hubs + Sections + Concepts (Hides raw sentences)"
-              >
-                Architecture
-              </button>
-              <button
-                type="button"
-                onClick={() => setDensityMode('full')}
-                className={`px-2.5 py-1 rounded transition ${
-                  densityMode === 'full'
-                    ? 'bg-indigo-950 text-indigo-300 border border-indigo-700/60 font-semibold shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-                title="Expands all nodes in non-overlapping Phyllotaxis spirals"
-              >
-                Full Horizon
-              </button>
-            </div>
-
-            <div className="flex items-center gap-1.5">
-              <button
-                onClick={handleExpandAll}
-                className="px-2.5 py-1 rounded-lg text-xs font-medium text-cyan-200 border transition-all duration-200 hover:text-white flex items-center gap-1 active:scale-95 bg-slate-900/60 border-cyan-800/60 cursor-pointer"
-                title="Expand all baseline nodes and document clusters"
-              >
-                <ChevronRight className="w-3.5 h-3.5 text-cyan-400 rotate-90" />
-                <span>Expand All</span>
-              </button>
-
-              <button
-                onClick={handleCollapseAll}
-                className="px-2.5 py-1 rounded-lg text-xs font-medium text-purple-200 border transition-all duration-200 hover:text-white flex items-center gap-1 active:scale-95 bg-slate-900/60 border-purple-800/60 cursor-pointer"
-                title="Fold document clusters into supernodes"
-              >
-                <ChevronRight className="w-3.5 h-3.5 text-purple-400" />
-                <span>Collapse All</span>
-              </button>
-            </div>
-
-            {/* Real-Time Epistemic Search Input */}
-            <div className="relative flex-1 min-w-[170px]">
+          {/* Sticky Search & Filtering Section */}
+          <div className="p-3 border-b border-slate-800/80 bg-slate-950/70 backdrop-blur-sm flex-shrink-0">
+            <div className="relative w-full">
               <Search className="w-3.5 h-3.5 text-cyan-400 absolute left-3 top-2.5" />
               <input
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search concepts, propositions, authors..."
-                className="w-full rounded-lg pl-8 pr-7 py-1.5 text-xs text-white placeholder-cyan-400/50 border transition-all duration-200 focus:outline-none focus:ring-1 focus:ring-cyan-400 bg-slate-950/80 border-cyan-800/60"
+                placeholder="Search concepts, authors..."
+                className="w-full rounded-lg pl-8 pr-7 py-1.5 text-xs text-white placeholder-slate-500 border transition-all duration-200 focus:outline-none focus:ring-1 focus:ring-cyan-400 bg-slate-900/90 border-slate-800 hover:border-slate-700"
               />
               {searchQuery && (
                 <button
                   onClick={() => setSearchQuery('')}
-                  className="absolute right-2.5 top-2.5 text-cyan-400 hover:text-white"
+                  className="absolute right-2.5 top-2.5 text-slate-400 hover:text-white"
+                  title="Clear search"
                 >
                   <X className="w-3.5 h-3.5" />
                 </button>
               )}
             </div>
+            {searchQuery && (
+              <div className="mt-1.5 flex items-center justify-between text-[10px] font-mono px-1">
+                <span className="text-rose-400">{searchMatchCount} matching entities</span>
+                <button
+                  onClick={() => setSearchQuery('')}
+                  className="text-slate-400 hover:text-slate-200 underline"
+                >
+                  Reset
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Scrollable Workspace Controls */}
+          <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-5 custom-scrollbar">
+            {/* Section 1: Navigation & Telemetry */}
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between text-[11px] font-semibold tracking-wider uppercase text-slate-400">
+                <span className="flex items-center gap-1.5">
+                  <Activity className="w-3.5 h-3.5 text-cyan-400" />
+                  Telemetry & LoD
+                </span>
+                <span
+                  className="px-1.5 py-0.5 rounded text-[9px] font-mono font-medium bg-slate-900 border border-slate-800 text-cyan-300"
+                  title={LOD_TIER_LABELS[currentLoDTier].description}
+                >
+                  {LOD_TIER_LABELS[currentLoDTier].name}
+                </span>
+              </div>
+
+              {/* Node Counters Card */}
+              <div className="bg-slate-900/60 rounded-lg p-2.5 border border-slate-800/80 space-y-1.5 font-mono text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400">Visible on Canvas:</span>
+                  <span className="text-cyan-300 font-semibold">{layoutTree.length} nodes</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400">Corpus Capacity:</span>
+                  <span className="text-slate-300">
+                    {ingestedGraph.nodes.length > 0
+                      ? `${50 + ingestedGraph.nodes.length} nodes`
+                      : '50 baseline'}
+                  </span>
+                </div>
+                {ingestedGraph.nodes.length > 0 && (
+                  <div className="flex items-center justify-between text-emerald-400 text-[11px] pt-1 border-t border-slate-800/60">
+                    <span>Ingested Documents:</span>
+                    <span>
+                      +{ingestedGraph.nodes.length} from{' '}
+                      {new Set(ingestedGraph.nodes.map((n) => n.sourceFile)).size} docs
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Density Mode Segmented Selector */}
+              <div className="space-y-1">
+                <label className="text-[10px] font-mono uppercase tracking-wider text-slate-400 flex items-center gap-1">
+                  <Sliders className="w-3 h-3 text-cyan-400" /> Density Mode
+                </label>
+                <div className="grid grid-cols-3 gap-1 bg-slate-900/80 p-1 rounded-lg border border-slate-800 text-[11px] font-mono">
+                  <button
+                    type="button"
+                    onClick={() => setDensityMode('smart')}
+                    className={`py-1.5 px-1 rounded transition text-center ${
+                      densityMode === 'smart'
+                        ? 'bg-cyan-950 text-cyan-300 border border-cyan-700/60 font-semibold shadow-sm'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                    title="Auto Progressive Disclosure with Semantic Zoom"
+                  >
+                    Smart LoD
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDensityMode('architecture')}
+                    className={`py-1.5 px-1 rounded transition text-center ${
+                      densityMode === 'architecture'
+                        ? 'bg-purple-950 text-purple-300 border border-purple-700/60 font-semibold shadow-sm'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                    title="Baseline + Document Hubs + Sections + Concepts"
+                  >
+                    Arch
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDensityMode('full')}
+                    className={`py-1.5 px-1 rounded transition text-center ${
+                      densityMode === 'full'
+                        ? 'bg-indigo-950 text-indigo-300 border border-indigo-700/60 font-semibold shadow-sm'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                    title="Phyllotaxis Spiral Packing (Full Horizon)"
+                  >
+                    Full
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Section 2: Action Triggers */}
+            <div className="space-y-2.5 pt-2 border-t border-slate-800/80">
+              <h2 className="text-[11px] font-semibold tracking-wider uppercase text-slate-400 flex items-center gap-1.5">
+                <Layers className="w-3.5 h-3.5 text-emerald-400" />
+                Action Triggers
+              </h2>
+
+              <div className="space-y-2">
+                {/* Primary Document Ingestion Button */}
+                <button
+                  type="button"
+                  onClick={() => setIsIngestionOpen(true)}
+                  className="w-full py-2 px-3 rounded-lg text-xs font-semibold text-emerald-200 border transition-all duration-200 hover:text-white flex items-center justify-between active:scale-[0.98] cursor-pointer group"
+                  style={{
+                    backgroundColor: 'rgba(6, 78, 59, 0.75)',
+                    borderColor: 'rgba(52, 211, 153, 0.8)',
+                    boxShadow: '0 0 12px rgba(16, 185, 129, 0.25)'
+                  }}
+                  title="Ingest philosophical writings (Markdown, Text, PDF, JSON, CSV)"
+                >
+                  <span className="flex items-center gap-2">
+                    <Upload className="w-4 h-4 text-emerald-400 group-hover:scale-110 transition-transform" />
+                    <span>Ingest Documents</span>
+                  </span>
+                  <span className="text-[10px] font-mono text-emerald-300/80 uppercase">Upload</span>
+                </button>
+
+                {/* Google Workspace & Drive Button */}
+                <button
+                  type="button"
+                  onClick={() => setIsWorkspaceOpen(true)}
+                  className="w-full py-2 px-3 rounded-lg text-xs font-semibold text-blue-200 border transition-all duration-200 hover:text-white flex items-center justify-between active:scale-[0.98] cursor-pointer group"
+                  style={{
+                    backgroundColor: 'rgba(30, 58, 138, 0.75)',
+                    borderColor: 'rgba(96, 165, 250, 0.8)',
+                    boxShadow: '0 0 12px rgba(59, 130, 246, 0.25)'
+                  }}
+                  title="Google Drive & Google Docs Hub"
+                >
+                  <span className="flex items-center gap-2">
+                    <HardDrive className="w-4 h-4 text-blue-400 group-hover:scale-110 transition-transform" />
+                    <span>Drive & Docs Hub</span>
+                  </span>
+                  {googleUser ? (
+                    <span className="flex items-center gap-1 text-[10px] font-mono text-emerald-300">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_#34d399]" />
+                      Synced
+                    </span>
+                  ) : (
+                    <span className="text-[10px] font-mono text-blue-300/80">Connect</span>
+                  )}
+                </button>
+
+                {/* Cluster Expansion & Collapse */}
+                <div className="grid grid-cols-2 gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={handleExpandAll}
+                    className="py-1.5 px-2.5 rounded-lg text-xs font-medium text-cyan-200 border transition active:scale-95 bg-slate-900/80 border-cyan-800/60 hover:bg-slate-800 flex items-center justify-center gap-1 cursor-pointer"
+                    title="Expand all baseline nodes and document clusters"
+                  >
+                    <ChevronRight className="w-3.5 h-3.5 text-cyan-400 rotate-90" />
+                    <span>Expand All</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleCollapseAll}
+                    className="py-1.5 px-2.5 rounded-lg text-xs font-medium text-purple-200 border transition active:scale-95 bg-slate-900/80 border-purple-800/60 hover:bg-slate-800 flex items-center justify-center gap-1 cursor-pointer"
+                    title="Fold document clusters into supernodes"
+                  >
+                    <ChevronRight className="w-3.5 h-3.5 text-purple-400" />
+                    <span>Collapse All</span>
+                  </button>
+                </div>
+
+                {/* Reset Ingested Graph */}
+                {ingestedGraph.nodes.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleClearIngested}
+                    className="w-full py-1.5 px-3 rounded-lg text-xs font-medium text-rose-300 border border-rose-500/40 bg-rose-950/40 hover:bg-rose-900/60 transition active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer mt-1"
+                    title="Clear Ingested Graph"
+                  >
+                    <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                    <span>Reset Ingested Corpus</span>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Section 3: Epistemic Taxonomy Legend */}
+            <div className="space-y-2 pt-2 border-t border-slate-800/80">
+              <h2 className="text-[11px] font-semibold tracking-wider uppercase text-slate-400 flex items-center gap-1.5">
+                <Compass className="w-3.5 h-3.5 text-purple-400" />
+                Epistemic Legend
+              </h2>
+              <div className="bg-slate-900/40 rounded-lg p-2.5 border border-slate-800/60 space-y-1.5 text-[11px] font-mono">
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-cyan-400 shadow-[0_0_6px_#22d3ee]" />
+                  <span className="text-slate-300">Baseline Ontology</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 shadow-[0_0_6px_#34d399]" />
+                  <span className="text-slate-300">Document Supernodes</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-indigo-400 shadow-[0_0_6px_#818cf8]" />
+                  <span className="text-slate-300">Section & Concept Hubs</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-rose-400 shadow-[0_0_6px_#f43f5e]" />
+                  <span className="text-slate-300">Dialectical Tensions</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-amber-400 shadow-[0_0_6px_#fbbf24]" />
+                  <span className="text-slate-300">Unresolved References</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Sidebar Footer Controls */}
+          <div className="p-3 border-t border-slate-800/80 bg-slate-950/90 flex items-center justify-between text-xs font-mono text-slate-400 flex-shrink-0">
+            <span className="text-cyan-400/90">Zoom: {Math.round(viewport.scale * 100)}%</span>
+            <button
+              type="button"
+              onClick={handleResetView}
+              className="px-2 py-1 rounded bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-cyan-300 hover:text-white transition flex items-center gap-1 active:scale-95 cursor-pointer"
+              title="Reset Viewport Center"
+            >
+              <Maximize2 className="w-3 h-3" />
+              <span>Center</span>
+            </button>
           </div>
         </div>
-      </header>
+      </aside>
 
-      {/* 3. Floating Quick Viewport Dock */}
-      <div className="absolute bottom-5 right-5 z-30 flex items-center gap-2">
-        <button
-          onClick={() => setViewport((v) => ({ ...v, scale: Math.min(v.scale * 1.2, 3.8) }))}
-          className="p-2.5 rounded-lg bg-zinc-950/80 text-cyan-300 border border-cyan-500/50 hover:border-cyan-400 backdrop-blur-md transition active:scale-95 cursor-pointer"
-          title="Zoom In (+)"
-        >
-          <ZoomIn className="w-4 h-4" />
-        </button>
+      {/* 2. Sleek Boundary Toggle Button */}
+      <button
+        type="button"
+        onClick={() => setSidebarOpen((prev) => !prev)}
+        className="absolute top-4 z-40 w-8 h-8 rounded-full bg-slate-900/95 hover:bg-slate-800 border border-cyan-500/50 text-cyan-300 hover:text-white flex items-center justify-center shadow-[0_0_12px_rgba(0,240,255,0.3)] backdrop-blur-md transition-all duration-200 active:scale-95 cursor-pointer focus:outline-none focus:ring-2 focus:ring-cyan-500/50"
+        style={{
+          left: isMobile
+            ? (sidebarOpen ? 'calc(320px - 14px)' : '14px')
+            : (sidebarOpen ? 'calc(var(--sidebar-width, 320px) - 16px)' : '16px'),
+          transition: 'left 250ms cubic-bezier(0.4, 0, 0.2, 1)'
+        }}
+        title={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+        aria-label={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+      >
+        <ChevronRight
+          className={`w-4 h-4 transition-transform duration-250 ${sidebarOpen ? 'rotate-180' : ''}`}
+        />
+      </button>
 
-        <button
-          onClick={() => setViewport((v) => ({ ...v, scale: Math.max(v.scale * 0.8, 0.15) }))}
-          className="p-2.5 rounded-lg bg-zinc-950/80 text-cyan-300 border border-cyan-500/50 hover:border-cyan-400 backdrop-blur-md transition active:scale-95 cursor-pointer"
-          title="Zoom Out (-)"
-        >
-          <ZoomOut className="w-4 h-4" />
-        </button>
-
-        <button
-          onClick={handleResetView}
-          className="p-2.5 rounded-lg bg-zinc-950/80 text-cyan-300 border border-cyan-500/50 hover:border-cyan-400 backdrop-blur-md transition active:scale-95 cursor-pointer"
-          title="Center Canvas (Home)"
-        >
-          <Maximize2 className="w-4 h-4" />
-        </button>
-
-        <button
-          onClick={async () => {
-            if (document.fullscreenElement) {
-              await document.exitFullscreen();
-            } else {
-              await containerRef.current?.requestFullscreen().catch(() => setIsFullscreen(true));
+      {/* 3. Main Graph Canvas Viewport Wrapper */}
+      <main ref={canvasContainerRef} className="relative w-full h-full overflow-hidden">
+        {/* Full-Viewport Cosmic Canvas */}
+        <canvas
+          ref={canvasRef}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
+          onClick={handleCanvasClick}
+          data-node-count={layoutTree.length}
+          tabIndex={0}
+          aria-label="Interactive topology graph. Enter inspects the root, arrow keys pan, plus and minus zoom, Home resets, Escape closes the inspector."
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              setSelectedNode(layoutTree[0]);
+              setDrawerOpen(true);
+            } else if (event.key === 'Escape') {
+              setDrawerOpen(false);
+            } else if (event.key === 'Home') {
+              event.preventDefault();
+              handleResetView();
+            } else if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
+              event.preventDefault();
+              setViewport((v) => ({
+                ...v,
+                x: Number.isFinite(v.x) ? v.x + (event.key === 'ArrowLeft' ? 30 : event.key === 'ArrowRight' ? -30 : 0) : v.x,
+                y: Number.isFinite(v.y) ? v.y + (event.key === 'ArrowUp' ? 30 : event.key === 'ArrowDown' ? -30 : 0) : v.y
+              }));
+            } else if (['+', '=', '-'].includes(event.key)) {
+              event.preventDefault();
+              setViewport((v) => {
+                const curScale = Number.isFinite(v.scale) && v.scale > 0 ? v.scale : 0.85;
+                return {
+                  ...v,
+                  scale: Math.min(3.8, Math.max(0.15, curScale * (event.key === '-' ? 0.89 : 1.12)))
+                };
+              });
             }
           }}
-          className="p-2.5 rounded-lg bg-zinc-950/80 text-purple-300 border border-purple-500/50 hover:border-purple-400 backdrop-blur-md transition active:scale-95 cursor-pointer"
-          title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
-        >
-          {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
-        </button>
-      </div>
+          style={{ touchAction: 'none' }}
+          className="w-full h-full cursor-grab active:cursor-grabbing block focus-visible:outline focus-visible:outline-cyan-400"
+        />
 
-      {/* 4. Canvas Navigation Hints & Zoom Scale */}
-      <footer className="absolute bottom-4 left-4 right-4 z-20 flex flex-wrap items-center gap-2 text-[9px] sm:text-[11px] font-mono text-cyan-300/70 pointer-events-none">
-        <span className="hidden sm:inline px-2.5 py-1 rounded bg-black/75 backdrop-blur-md border border-cyan-500/30">
-          • Pan: Drag canvas
-        </span>
-        <span className="hidden sm:inline px-2.5 py-1 rounded bg-black/75 backdrop-blur-md border border-cyan-500/30">
-          • Zoom: Scroll wheel ({Math.round(viewport.scale * 100)}%)
-        </span>
-        <span className="px-2.5 py-1 rounded bg-black/75 backdrop-blur-md border border-cyan-500/30">
-          • Inspect & Expand: Click node
-        </span>
-      </footer>
+        {/* Floating Quick Viewport Dock (Bottom-Right) */}
+        <div className="absolute bottom-5 right-5 z-30 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setViewport((v) => ({ ...v, scale: Math.min(v.scale * 1.2, 3.8) }))}
+            className="p-2.5 rounded-lg bg-zinc-950/80 text-cyan-300 border border-cyan-500/50 hover:border-cyan-400 backdrop-blur-md transition active:scale-95 cursor-pointer shadow-lg"
+            title="Zoom In (+)"
+          >
+            <ZoomIn className="w-4 h-4" />
+          </button>
 
-      {/* 5. Accessible High-Performance Side-Panel Drawer */}
-      <NodeInspectorDrawer
-        node={selectedNode}
-        isOpen={drawerOpen}
-        onClose={() => {
-          setDrawerOpen(false);
-          setSelectedNode(null);
-          canvasRef.current?.focus();
-        }}
-        onCenterNode={handleCenterNode}
-        onFilterConnected={handleFilterConnected}
-        onSelectNode={handleSelectNodeById}
-        allNodesMap={allNodesMap}
-        isClusterExpanded={selectedNode ? expandedClusterIds.has(selectedNode.id) : false}
-        onToggleClusterExpansion={handleToggleClusterExpansion}
-      />
+          <button
+            type="button"
+            onClick={() => setViewport((v) => ({ ...v, scale: Math.max(v.scale * 0.8, 0.15) }))}
+            className="p-2.5 rounded-lg bg-zinc-950/80 text-cyan-300 border border-cyan-500/50 hover:border-cyan-400 backdrop-blur-md transition active:scale-95 cursor-pointer shadow-lg"
+            title="Zoom Out (-)"
+          >
+            <ZoomOut className="w-4 h-4" />
+          </button>
 
-      {/* 6. Document Ingestion Subsystem Modal */}
-      <IngestionModal
-        isOpen={isIngestionOpen}
-        onClose={() => setIsIngestionOpen(false)}
-        onIngestionComplete={handleIngestionComplete}
-        onOpenGoogleWorkspace={() => setIsWorkspaceOpen(true)}
-      />
+          <button
+            type="button"
+            onClick={handleResetView}
+            className="p-2.5 rounded-lg bg-zinc-950/80 text-cyan-300 border border-cyan-500/50 hover:border-cyan-400 backdrop-blur-md transition active:scale-95 cursor-pointer shadow-lg"
+            title="Center Canvas (Home)"
+          >
+            <Maximize2 className="w-4 h-4" />
+          </button>
 
-      {/* 7. Google Workspace Integration Modal (Drive & Docs) */}
-      <GoogleWorkspaceModal
-        isOpen={isWorkspaceOpen}
-        onClose={() => setIsWorkspaceOpen(false)}
-        onIngestionComplete={handleIngestionComplete}
-        selectedNode={selectedNode}
-        baselineTree={treeData}
-        ingestedGraph={ingestedGraph}
-      />
+          <button
+            type="button"
+            onClick={async () => {
+              if (document.fullscreenElement) {
+                await document.exitFullscreen();
+              } else {
+                await containerRef.current?.requestFullscreen().catch(() => setIsFullscreen(true));
+              }
+            }}
+            className="p-2.5 rounded-lg bg-zinc-950/80 text-purple-300 border border-purple-500/50 hover:border-purple-400 backdrop-blur-md transition active:scale-95 cursor-pointer shadow-lg"
+            title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
+          >
+            {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+          </button>
+        </div>
+
+        {/* Canvas Navigation Hints & Zoom Scale (Bottom-Left) */}
+        <footer className="absolute bottom-4 left-4 z-20 flex flex-wrap items-center gap-2 text-[9px] sm:text-[11px] font-mono text-cyan-300/70 pointer-events-none">
+          <span className="hidden sm:inline px-2.5 py-1 rounded bg-black/75 backdrop-blur-md border border-cyan-500/30">
+            • Pan: Drag canvas
+          </span>
+          <span className="hidden sm:inline px-2.5 py-1 rounded bg-black/75 backdrop-blur-md border border-cyan-500/30">
+            • Zoom: Scroll wheel ({Math.round(viewport.scale * 100)}%)
+          </span>
+          <span className="px-2.5 py-1 rounded bg-black/75 backdrop-blur-md border border-cyan-500/30">
+            • Inspect & Expand: Click node
+          </span>
+        </footer>
+
+        {/* Accessible High-Performance Side-Panel Drawer */}
+        <NodeInspectorDrawer
+          node={selectedNode}
+          isOpen={drawerOpen}
+          onClose={() => {
+            setDrawerOpen(false);
+            setSelectedNode(null);
+            canvasRef.current?.focus();
+          }}
+          onCenterNode={handleCenterNode}
+          onFilterConnected={handleFilterConnected}
+          onSelectNode={handleSelectNodeById}
+          allNodesMap={allNodesMap}
+          isClusterExpanded={selectedNode ? expandedClusterIds.has(selectedNode.id) : false}
+          onToggleClusterExpansion={handleToggleClusterExpansion}
+        />
+
+        {/* Document Ingestion Subsystem Modal */}
+        <IngestionModal
+          isOpen={isIngestionOpen}
+          onClose={() => setIsIngestionOpen(false)}
+          onIngestionComplete={handleIngestionComplete}
+          onOpenGoogleWorkspace={() => setIsWorkspaceOpen(true)}
+        />
+
+        {/* Google Workspace Integration Modal (Drive & Docs) */}
+        <GoogleWorkspaceModal
+          isOpen={isWorkspaceOpen}
+          onClose={() => setIsWorkspaceOpen(false)}
+          onIngestionComplete={handleIngestionComplete}
+          selectedNode={selectedNode}
+          baselineTree={treeData}
+          ingestedGraph={ingestedGraph}
+        />
+      </main>
     </div>
   );
 };

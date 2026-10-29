@@ -1,5 +1,7 @@
 /**
  * Base Parser Strategy Interface & Common AST / Text Processing Utilities
+ * Provides bounded O(1) memory slice streaming, cooperative multitasking yields,
+ * forward-progress guarantees, and shared epistemic classification primitives.
  */
 
 import type {
@@ -15,8 +17,80 @@ import type {
 } from '../../types/graph';
 import { generateScopedId, sanitizeDisplayText } from '../../utils/crypto';
 
+/**
+ * Shared macrotask yield utility: yields control back to the browser macrotask queue
+ * allowing React onProgress DOM updates to paint at 60 FPS.
+ */
+export const yieldToMain = (): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, 0));
+
+/**
+ * Streaming line/chunk reader helper: reads file in 2 MB slice windows
+ * using TextDecoder with stream: true, preserving multi-byte UTF-8 sequences and
+ * carrying over partial trailing lines without reading the whole file into contiguous V8 strings.
+ */
+export async function streamFileLines(
+  file: File,
+  onLineBatch: (lines: string[], bytesRead: number, totalBytes: number) => Promise<void> | void,
+  chunkSize: number = 2 * 1024 * 1024
+): Promise<void> {
+  const decoder = new TextDecoder('utf-8');
+  const totalBytes = file.size;
+  let offset = 0;
+  let carryOver = '';
+
+  while (offset < totalBytes) {
+    const end = Math.min(offset + chunkSize, totalBytes);
+    const sliceBuffer = await file.slice(offset, end).arrayBuffer();
+    const isLastChunk = end >= totalBytes;
+    const decoded = decoder.decode(sliceBuffer, { stream: !isLastChunk });
+
+    const combined = carryOver + decoded;
+    const lines = combined.split(/\r?\n/);
+    carryOver = isLastChunk ? '' : (lines.pop() ?? '');
+
+    if (lines.length > 0) {
+      await onLineBatch(lines, end, totalBytes);
+    }
+
+    offset = end;
+    await yieldToMain();
+  }
+
+  if (carryOver.length > 0) {
+    await onLineBatch([carryOver], totalBytes, totalBytes);
+    await yieldToMain();
+  }
+}
+
+/**
+ * Text chunking helper with strict forward progress guarantees (step >= 1).
+ */
+export function chunkTextWithStep(
+  text: string,
+  chunkSize = 2000,
+  overlap = 200
+): Array<{ text: string; start: number; end: number }> {
+  const chunks: Array<{ text: string; start: number; end: number }> = [];
+  const total = text.length;
+  let offset = 0;
+  const step = Math.max(1, chunkSize - overlap);
+
+  while (offset < total) {
+    const end = Math.min(offset + chunkSize, total);
+    chunks.push({
+      text: text.substring(offset, end),
+      start: offset,
+      end
+    });
+    offset += step;
+  }
+  return chunks;
+}
+
 export interface ParserOptions {
   enableAiEnrichment?: boolean;
+  onProgress?: (stageLabel: string, progressFraction?: number) => void;
 }
 
 export interface FileParser {

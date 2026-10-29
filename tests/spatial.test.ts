@@ -168,8 +168,23 @@ async function runSpatialTests() {
     console.log('  ✓ PASS: projectViewGraph folds large documents into compound supernodes and expands on demand');
   }
 
+  // Test 6: Defensive Scale & Non-finite Zoom Bounds
+  {
+    assert.equal(getLoDTier(NaN), 1, 'NaN scale should default defensively to Tier 1');
+    assert.equal(getLoDTier(null), 1, 'null scale should default defensively to Tier 1');
+    assert.equal(getLoDTier(undefined), 1, 'undefined scale should default defensively to Tier 1');
+    assert.equal(getLoDTier(0), 1, 'zero scale should default defensively to Tier 1');
+    assert.equal(getLoDTier(-1), 1, 'negative scale should default defensively to Tier 1');
+
+    const culler = new ScreenSpaceLabelCuller();
+    culler.reset(NaN as any, 0, 55);
+    assert.equal(culler.isInFrustum(NaN, 100), false, 'NaN coordinates should safely return false');
+    assert.equal(culler.testAndInsert({ x1: NaN, y1: 0, x2: 100, y2: 20, priority: 1 }), false, 'Non-finite rect rejected');
+    console.log('  ✓ PASS: getLoDTier and ScreenSpaceLabelCuller defensively reject non-finite/NaN camera values');
+  }
+
   console.log('---------------------------------------------------------------');
-  console.log('  ALL SPATIAL TESTS PASSED (5 / 5)');
+  console.log('  ALL SPATIAL TESTS PASSED (6 / 6)');
   console.log('===============================================================');
 }
 
