@@ -27,6 +27,8 @@ interface NodeInspectorDrawerProps {
   onFilterConnected?: (node: EpistemicTopologyNode) => void;
   onSelectNode?: (nodeId: string) => void;
   allNodesMap?: Map<string, EpistemicTopologyNode>;
+  isClusterExpanded?: boolean;
+  onToggleClusterExpansion?: (clusterId: string) => void;
 }
 
 /**
@@ -179,7 +181,9 @@ export const NodeInspectorDrawer: React.FC<NodeInspectorDrawerProps> = ({
   onCenterNode,
   onFilterConnected,
   onSelectNode,
-  allNodesMap
+  allNodesMap,
+  isClusterExpanded,
+  onToggleClusterExpansion
 }) => {
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const asideRef = useRef<HTMLElement | null>(null);
@@ -616,6 +620,22 @@ export const NodeInspectorDrawer: React.FC<NodeInspectorDrawerProps> = ({
             <Crosshair className="w-3.5 h-3.5 shrink-0" />
             <span className="whitespace-nowrap">Center in Graph</span>
           </button>
+
+          {/* Quick-action 1.5: Expand / Fold Cluster Hub */}
+          {onToggleClusterExpansion && (normalizedNode.nodeKind === 'document-hub' || normalizedNode.nodeKind === 'section') && (
+            <button
+              onClick={() => onToggleClusterExpansion(normalizedNode.id)}
+              className={`px-3 py-2 rounded-lg border text-xs font-medium flex items-center justify-center gap-1.5 transition active:scale-95 focus:outline-none ${
+                isClusterExpanded
+                  ? 'bg-purple-950/50 border-purple-600/60 text-purple-300 hover:bg-purple-900/60'
+                  : 'bg-indigo-950/50 border-indigo-600/60 text-indigo-300 hover:bg-indigo-900/60'
+              }`}
+              title={isClusterExpanded ? 'Fold child nodes into cluster' : 'Expand child nodes on canvas'}
+            >
+              <Layers className="w-3.5 h-3.5 shrink-0" />
+              <span className="whitespace-nowrap">{isClusterExpanded ? 'Fold Cluster' : 'Expand Cluster'}</span>
+            </button>
+          )}
 
           {/* Quick-action 2: Filter Connected Nodes */}
           <button
