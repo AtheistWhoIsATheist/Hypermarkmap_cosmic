@@ -32,7 +32,8 @@ import {
   Compass,
   FileText,
   Activity,
-  PlusCircle
+  PlusCircle,
+  Download
 } from 'lucide-react';
 import {
   MARKMAP_EPITEMIC_TOPOLOGY,
@@ -44,6 +45,7 @@ import { GoogleWorkspaceModal } from './GoogleWorkspaceModal';
 import { ConfirmModal } from './ConfirmModal';
 import { CosmicFloatingHUD } from './CosmicFloatingHUD';
 import { CreateNodeModal, type CreateNodeFormData } from './CreateNodeModal';
+import { ExportTopologyModal } from './ExportTopologyModal';
 import { subscribeAuthState, getCurrentUser } from '../services/workspace/authService';
 import { GraphStorage } from '../storage/GraphStorage';
 import type { GraphNode, GraphEdge, IngestionBatchItem } from '../types/graph';
@@ -156,6 +158,7 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
   const [isIngestionOpen, setIsIngestionOpen] = useState(false);
   const [isWorkspaceOpen, setIsWorkspaceOpen] = useState(false);
   const [isCreateNodeOpen, setIsCreateNodeOpen] = useState(false);
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [customRenames, setCustomRenames] = useState<Record<string, string>>({});
   const [googleUser, setGoogleUser] = useState<User | null>(() => getCurrentUser());
 
@@ -816,12 +819,16 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
       } else if (e.key === 'Escape') {
         setDrawerOpen(false);
         setIsCreateNodeOpen(false);
+        setIsExportModalOpen(false);
         setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
         setSearchQuery('');
         canvasRef.current?.focus();
       } else if (e.key === 'Home') {
         e.preventDefault();
         handleResetView();
+      } else if ((e.ctrlKey || e.metaKey) && (e.key === 'e' || e.key === 'E')) {
+        e.preventDefault();
+        setIsExportModalOpen(true);
       } else if ((e.key === 'n' || e.key === 'N') && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         setIsCreateNodeOpen(true);
@@ -1799,6 +1806,25 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
                   )}
                 </button>
 
+                {/* Export Topology JSON Trigger */}
+                <button
+                  type="button"
+                  onClick={() => setIsExportModalOpen(true)}
+                  className="w-full py-2 px-3 rounded-lg text-xs font-semibold text-cyan-200 border transition-all duration-200 hover:text-white flex items-center justify-between active:scale-[0.98] cursor-pointer group"
+                  style={{
+                    backgroundColor: 'rgba(8, 51, 68, 0.75)',
+                    borderColor: 'rgba(34, 211, 238, 0.8)',
+                    boxShadow: '0 0 12px rgba(6, 182, 212, 0.25)'
+                  }}
+                  title="Export serialized topology from IndexedDB into a JSON file (Ctrl+E)"
+                >
+                  <span className="flex items-center gap-2">
+                    <Download className="w-4 h-4 text-cyan-400 group-hover:scale-110 transition-transform" />
+                    <span>Export Topology JSON</span>
+                  </span>
+                  <span className="text-[10px] font-mono text-cyan-300/80 uppercase">JSON</span>
+                </button>
+
                 {/* Cluster Expansion & Collapse */}
                 <div className="grid grid-cols-2 gap-2 pt-1">
                   <button
@@ -1990,6 +2016,7 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
             }
           }}
           onOpenCreateNode={() => setIsCreateNodeOpen(true)}
+          onOpenExport={() => setIsExportModalOpen(true)}
         />
 
         {/* Floating Quick Viewport Dock (Bottom-Right) */}
@@ -2114,6 +2141,12 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
           confirmVariant={confirmModalConfig.confirmVariant}
           onConfirm={confirmModalConfig.onConfirm}
           onCancel={() => setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }))}
+        />
+
+        {/* Export Topology JSON Modal */}
+        <ExportTopologyModal
+          isOpen={isExportModalOpen}
+          onClose={() => setIsExportModalOpen(false)}
         />
       </main>
     </div>

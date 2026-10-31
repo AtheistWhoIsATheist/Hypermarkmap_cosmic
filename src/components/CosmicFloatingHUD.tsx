@@ -15,7 +15,8 @@ import {
   ChevronLeft,
   ChevronRight,
   Layers,
-  PlusCircle
+  PlusCircle,
+  Download
 } from 'lucide-react';
 import { CosmicMinimap } from './CosmicMinimap';
 import type { PositionedVisualNode, ViewportCamera, LayoutPhysicsOptions } from '../utils/graphSpatialEngine';
@@ -40,6 +41,7 @@ interface CosmicFloatingHUDProps {
   isFullscreen: boolean;
   onToggleFullscreen: () => void;
   onOpenCreateNode?: () => void;
+  onOpenExport?: () => void;
 }
 
 export const CosmicFloatingHUD: React.FC<CosmicFloatingHUDProps> = ({
@@ -61,7 +63,8 @@ export const CosmicFloatingHUD: React.FC<CosmicFloatingHUDProps> = ({
   onZoomOut,
   isFullscreen,
   onToggleFullscreen,
-  onOpenCreateNode
+  onOpenCreateNode,
+  onOpenExport
 }) => {
   const [isHudExpanded, setIsHudExpanded] = useState(true);
   const [showMinimap, setShowMinimap] = useState(true);
@@ -118,6 +121,19 @@ export const CosmicFloatingHUD: React.FC<CosmicFloatingHUDProps> = ({
               >
                 <PlusCircle className="w-3.5 h-3.5 text-indigo-400" />
                 <span className="hidden sm:inline text-[11px]">Concept</span>
+              </button>
+            )}
+
+            {onOpenExport && (
+              <button
+                type="button"
+                onClick={onOpenExport}
+                className="px-2 py-1 rounded-lg border border-cyan-500/40 bg-cyan-950/70 hover:bg-cyan-900/80 text-cyan-200 text-xs font-medium transition cursor-pointer flex items-center gap-1 shadow-sm active:scale-95"
+                title="Export Topology JSON (Ctrl+E)"
+                aria-label="Export Topology JSON"
+              >
+                <Download className="w-3.5 h-3.5 text-cyan-400" />
+                <span className="hidden sm:inline text-[11px]">Export</span>
               </button>
             )}
 
