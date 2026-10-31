@@ -14,7 +14,8 @@ import {
   Sparkles,
   ChevronRight,
   Hash,
-  Database
+  Database,
+  Trash2
 } from 'lucide-react';
 import type { NodeCitation, NodeMetadataRecord, EpistemicTopologyNode } from '../types';
 import { normalizeEpistemicNode } from './GroundedEpistemicTopologyData';
@@ -29,6 +30,7 @@ interface NodeInspectorDrawerProps {
   allNodesMap?: Map<string, EpistemicTopologyNode>;
   isClusterExpanded?: boolean;
   onToggleClusterExpansion?: (clusterId: string) => void;
+  onDeleteNode?: (nodeId: string) => void;
 }
 
 /**
@@ -183,7 +185,8 @@ export const NodeInspectorDrawer: React.FC<NodeInspectorDrawerProps> = ({
   onSelectNode,
   allNodesMap,
   isClusterExpanded,
-  onToggleClusterExpansion
+  onToggleClusterExpansion,
+  onDeleteNode
 }) => {
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const asideRef = useRef<HTMLElement | null>(null);
@@ -377,16 +380,30 @@ export const NodeInspectorDrawer: React.FC<NodeInspectorDrawerProps> = ({
               </div>
             </div>
 
-            {/* Dedicated Dismissal Button */}
-            <button
-              ref={closeButtonRef}
-              onClick={onClose}
-              aria-label="Close inspector"
-              title="Close inspector (Esc)"
-              className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800/60 border border-transparent hover:border-slate-700 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 transition shrink-0 active:scale-95"
-            >
-              <X className="w-5 h-5" />
-            </button>
+            <div className="flex items-center gap-1 shrink-0">
+              {onDeleteNode && normalizedNode.sourceFile && (
+                <button
+                  type="button"
+                  onClick={() => onDeleteNode(normalizedNode.id)}
+                  aria-label="Delete ingested node"
+                  title="Delete node from graph"
+                  className="p-1.5 rounded-lg text-rose-400 hover:text-rose-200 hover:bg-rose-950/60 border border-transparent hover:border-rose-500/40 focus:outline-none focus:ring-2 focus:ring-rose-500/50 transition shrink-0 active:scale-95 cursor-pointer"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              )}
+
+              {/* Dedicated Dismissal Button */}
+              <button
+                ref={closeButtonRef}
+                onClick={onClose}
+                aria-label="Close inspector"
+                title="Close inspector (Esc)"
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800/60 border border-transparent hover:border-slate-700 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 transition shrink-0 active:scale-95 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
           </div>
         </header>
 

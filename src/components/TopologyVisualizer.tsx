@@ -40,6 +40,8 @@ import {
 import { NodeInspectorDrawer } from './NodeInspectorDrawer';
 import { IngestionModal } from './IngestionModal';
 import { GoogleWorkspaceModal } from './GoogleWorkspaceModal';
+import { ConfirmModal } from './ConfirmModal';
+import { CosmicFloatingHUD } from './CosmicFloatingHUD';
 import { subscribeAuthState, getCurrentUser } from '../services/workspace/authService';
 import { GraphStorage } from '../storage/GraphStorage';
 import type { GraphNode, GraphEdge, IngestionBatchItem } from '../types/graph';
@@ -47,6 +49,7 @@ import type { User } from 'firebase/auth';
 import {
   type DensityMode,
   type LoDTier,
+  type LayoutPhysicsOptions,
   LOD_THRESHOLDS,
   LOD_TIER_LABELS,
   getLoDTier,
@@ -148,6 +151,40 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
   const [isWorkspaceOpen, setIsWorkspaceOpen] = useState(false);
   const [googleUser, setGoogleUser] = useState<User | null>(() => getCurrentUser());
 
+  // Confirm Modal state for graph clear, layout reset, and node deletion
+  const [confirmModalConfig, setConfirmModalConfig] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    itemDetails?: string[];
+    confirmLabel?: string;
+    confirmVariant?: 'danger' | 'warning' | 'primary';
+    onConfirm: () => void;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => {}
+  });
+
+  // Layout Physics Tuning (Force Strength, Link Distance, Collision Radius)
+  const [layoutOptions, setLayoutOptions] = useState<LayoutPhysicsOptions>({
+    forceStrength: 1.0,
+    linkDistance: 1.0,
+    collisionRadius: 28
+  });
+
+  // Cached canvas viewport buffer dimensions to prevent layout thrashing
+  const canvasDimensionsRef = useRef<{ width: number; height: number; dpr: number }>({
+    width: typeof window !== 'undefined' ? window.innerWidth : 1200,
+    height: typeof window !== 'undefined' ? window.innerHeight : 800,
+    dpr: 1
+  });
+
+  // Space key pan state
+  const isSpaceHeldRef = useRef(false);
+  const [, setIsSpaceHeld] = useState(false);
+
   // Density Mode State: 'smart' (Auto LoD) | 'architecture' | 'full' (Phyllotaxis Full Horizon)
   const [densityMode, setDensityMode] = useState<DensityMode>('smart');
   // Tracks manually expanded Document and Section Hubs
@@ -174,14 +211,42 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
     setIngestedGraph(updated);
   }, []);
 
-  const handleClearIngested = useCallback(async () => {
-    if (window.confirm('Clear all ingested documents and reset graph to baseline topology?')) {
-      await GraphStorage.clearIngestedGraph();
-      setIngestedGraph(GraphStorage.getIngestedGraphSync());
-      setSelectedNode(null);
-      setDrawerOpen(false);
-      setExpandedClusterIds(new Set());
-    }
+  const handleClearIngested = useCallback(() => {
+    setConfirmModalConfig({
+      isOpen: true,
+      title: 'Reset Epistemic Topology',
+      message:
+        'Clear all ingested philosophical documents and reset the graph to baseline topology? This action will permanently remove all custom ingested nodes.',
+      confirmLabel: 'Reset Graph',
+      confirmVariant: 'danger',
+      onConfirm: async () => {
+        setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
+        await GraphStorage.clearIngestedGraph();
+        setIngestedGraph(GraphStorage.getIngestedGraphSync());
+        setSelectedNode(null);
+        setDrawerOpen(false);
+        setExpandedClusterIds(new Set());
+      }
+    });
+  }, []);
+
+  const handleOpenResetLayoutModal = useCallback(() => {
+    setConfirmModalConfig({
+      isOpen: true,
+      title: 'Reset Layout Physics?',
+      message:
+        'Restore force strength, link distance, and collision radius to factory baseline values?',
+      confirmLabel: 'Reset Layout',
+      confirmVariant: 'primary',
+      onConfirm: () => {
+        setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
+        setLayoutOptions({
+          forceStrength: 1.0,
+          linkDistance: 1.0,
+          collisionRadius: 28
+        });
+      }
+    });
   }, []);
 
   useEffect(() => {
@@ -294,7 +359,8 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
       expandedClusterIds,
       searchQuery,
       selectedNodeId: selectedNode?.id || null,
-      hoveredNodeId
+      hoveredNodeId,
+      layoutOptions
     });
   }, [
     treeData,
@@ -304,12 +370,21 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
     expandedClusterIds,
     searchQuery,
     selectedNode?.id,
-    hoveredNodeId
+    hoveredNodeId,
+    layoutOptions
   ]);
 
   const layoutTree = viewGraph.positionedNodes;
   const layoutTreeRef = useRef(layoutTree);
   layoutTreeRef.current = layoutTree;
+
+  // Matching nodes for instant search highlight & auto-pan
+  const matchingNodes = useMemo(() => {
+    if (!searchQuery.trim()) return [];
+    return layoutTree.filter((n) => n.isMatch);
+  }, [layoutTree, searchQuery]);
+
+  const searchMatchCount = matchingNodes.length;
 
   const bundledEdges = viewGraph.bundledEdges;
   const bundledEdgesRef = useRef(bundledEdges);
@@ -367,15 +442,49 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
 
   // Center camera smoothly on any selected topology node
   const handleCenterNode = useCallback((node: EpistemicTopologyNode) => {
-    const rect = getCanvasRectDefensive();
-    if (!rect) return;
     const pos = layoutTreeRef.current.find((n) => n.id === node.id);
     if (!pos) return;
-    const drawerOffset = window.innerWidth >= 640 ? 220 : 0;
-    const targetX = (rect.width - drawerOffset) / 2 - pos.x * viewportRef.current.scale;
-    const targetY = rect.height / 2 - pos.y * viewportRef.current.scale;
+    const dim = canvasDimensionsRef.current;
+    const drawerOffset = window.innerWidth >= 640 ? 180 : 0;
+    const curScale = viewportRef.current.scale;
+    const targetX = (dim.width - drawerOffset) / 2 - pos.x * curScale;
+    const targetY = dim.height / 2 - pos.y * curScale;
     setViewport((v) => ({ ...v, x: targetX, y: targetY }));
-  }, [getCanvasRectDefensive]);
+  }, []);
+
+  // Pan to world coordinates (from Minimap click/drag or search auto-pan)
+  const handlePanToWorld = useCallback((worldX: number, worldY: number) => {
+    const dim = canvasDimensionsRef.current;
+    const curScale = viewportRef.current.scale;
+    const drawerOffset = window.innerWidth >= 640 ? 180 : 0;
+    const targetX = (dim.width - drawerOffset) / 2 - worldX * curScale;
+    const targetY = dim.height / 2 - worldY * curScale;
+    setViewport((v) => ({ ...v, x: targetX, y: targetY }));
+  }, []);
+
+  // Delete an individual ingested node with confirmation modal
+  const handleDeleteNode = useCallback(
+    (nodeId: string) => {
+      const target = allNodesMap.get(nodeId);
+      if (!target) return;
+      setConfirmModalConfig({
+        isOpen: true,
+        title: 'Delete Epistemic Node?',
+        message: `Remove "${target.title}" and its connected relationships from the active graph?`,
+        itemDetails: [`Node ID: ${target.id}`, `Source: ${target.sourceFile || 'Ingested Node'}`],
+        confirmLabel: 'Delete Node',
+        confirmVariant: 'danger',
+        onConfirm: async () => {
+          setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
+          await GraphStorage.deleteNode(nodeId);
+          setIngestedGraph(GraphStorage.getIngestedGraphSync());
+          setSelectedNode(null);
+          setDrawerOpen(false);
+        }
+      });
+    },
+    [allNodesMap]
+  );
 
   // Filter or highlight connected relata
   const handleFilterConnected = useCallback((node: EpistemicTopologyNode) => {
@@ -402,16 +511,20 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
   );
 
   // Mouse & Gesture Handlers with Defensive Checks
+  // Mouse & Gesture Handlers with Space-to-pan & GPU Dampening
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 && e.button !== 1) return;
     e.currentTarget.setPointerCapture(e.pointerId);
     dragDistanceRef.current = 0;
     isDraggingRef.current = true;
     lastMousePosRef.current = { x: e.clientX, y: e.clientY };
+    if (canvasRef.current) {
+      canvasRef.current.style.cursor = 'grabbing';
+    }
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    const rect = getCanvasRectDefensive();
+    const rect = canvasRef.current?.getBoundingClientRect();
     if (!rect) return;
 
     if (isDraggingRef.current) {
@@ -426,6 +539,10 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
         y: Number.isFinite(prev.y + dy) ? prev.y + dy : prev.y
       }));
     } else {
+      if (isSpaceHeldRef.current) {
+        if (canvasRef.current) canvasRef.current.style.cursor = 'grab';
+        return;
+      }
       // Hover detection for 1-hop Ego-Network Spotlight
       const canvasX = e.clientX - rect.left;
       const canvasY = e.clientY - rect.top;
@@ -463,22 +580,29 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
       e.currentTarget.releasePointerCapture(e.pointerId);
     }
     if (canvasRef.current) {
-      canvasRef.current.style.cursor = hoveredNodeIdRef.current ? 'pointer' : 'grab';
+      canvasRef.current.style.cursor = isSpaceHeldRef.current
+        ? 'grab'
+        : hoveredNodeIdRef.current
+        ? 'pointer'
+        : 'grab';
     }
   };
 
+  // GPU-accelerated smooth wheel dampening with clamped scale range: 0.1x to 4.0x
   const handleWheel = useCallback((e: WheelEvent) => {
     e.preventDefault();
-    const rect = getCanvasRectDefensive();
+    const rect = canvasRef.current?.getBoundingClientRect();
     if (!rect) return;
 
-    const zoomFactor = e.deltaY < 0 ? 1.12 : 0.89;
+    // Exponential dampening based on deltaY
+    const zoomFactor = Math.pow(0.998, e.deltaY);
+    const safeZoom = Math.max(0.85, Math.min(1.18, zoomFactor));
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
 
     setViewport((prev) => {
       const currentScale = Number.isFinite(prev.scale) && prev.scale > 0 ? prev.scale : 0.85;
-      const newScale = Math.min(Math.max(currentScale * zoomFactor, 0.15), 3.8);
+      const newScale = Math.min(4.0, Math.max(0.1, currentScale * safeZoom));
       const ratio = newScale / currentScale;
       const newX = mouseX - (mouseX - prev.x) * ratio;
       const newY = mouseY - (mouseY - prev.y) * ratio;
@@ -488,7 +612,7 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
         scale: newScale
       };
     });
-  }, [getCanvasRectDefensive]);
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -497,9 +621,53 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
     return () => canvas.removeEventListener('wheel', handleWheel);
   }, [handleWheel]);
 
+  // Space-to-pan & Global Keyboard Shortcuts Listener
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+      if (e.code === 'Space') {
+        e.preventDefault();
+        if (!isSpaceHeldRef.current) {
+          isSpaceHeldRef.current = true;
+          setIsSpaceHeld(true);
+          if (canvasRef.current) {
+            canvasRef.current.style.cursor = 'grab';
+          }
+        }
+      } else if (e.key === 'Escape') {
+        setDrawerOpen(false);
+        setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
+        setSearchQuery('');
+        canvasRef.current?.focus();
+      } else if (e.key === 'Home') {
+        e.preventDefault();
+        handleResetView();
+      }
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space') {
+        isSpaceHeldRef.current = false;
+        setIsSpaceHeld(false);
+        if (canvasRef.current) {
+          canvasRef.current.style.cursor = hoveredNodeIdRef.current ? 'pointer' : 'grab';
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, []);
+
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (dragDistanceRef.current > 4) return;
-    const rect = getCanvasRectDefensive();
+    if (dragDistanceRef.current > 4 || isSpaceHeldRef.current) return;
+    const rect = canvasRef.current?.getBoundingClientRect();
     if (!rect) return;
 
     const canvasX = e.clientX - rect.left;
@@ -532,13 +700,53 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
     }
   };
 
+  // Double-click center-to-node focus
+  const handleCanvasDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+
+    const canvasX = e.clientX - rect.left;
+    const canvasY = e.clientY - rect.top;
+    const vp = viewportRef.current;
+    const worldX = (canvasX - vp.x) / vp.scale;
+    const worldY = (canvasY - vp.y) / vp.scale;
+
+    let found: PositionedVisualNode | null = null;
+    const currentNodes = layoutTreeRef.current;
+    for (let i = currentNodes.length - 1; i >= 0; i--) {
+      const node = currentNodes[i];
+      const hitRadius = Math.max(node.radius || 12, 18);
+      const dist = Math.hypot(node.x - worldX, node.y - worldY);
+      if (dist <= hitRadius) {
+        found = node;
+        break;
+      }
+    }
+
+    if (found) {
+      if (found.isClusterHub && (found.childCount || 0) > 0) {
+        handleToggleClusterExpansion(found.id);
+      }
+      setSelectedNode(found);
+      setDrawerOpen(true);
+      const targetScale = Math.min(4.0, Math.max(1.35, vp.scale));
+      const dim = canvasDimensionsRef.current;
+      const drawerOffset = window.innerWidth >= 640 ? 180 : 0;
+      const targetX = (dim.width - drawerOffset) / 2 - found.x * targetScale;
+      const targetY = dim.height / 2 - found.y * targetScale;
+      setViewport({ x: targetX, y: targetY, scale: targetScale });
+    } else {
+      handleResetView();
+    }
+  };
+
   const handleResetView = useCallback(() => {
     const canvas = canvasRef.current;
     const nodes = layoutTreeRef.current;
     if (!canvas || !nodes || nodes.length === 0) return;
-    const rect = getCanvasRectDefensive();
-    const clientWidth = rect?.width || canvas.clientWidth || (typeof window !== 'undefined' ? window.innerWidth : 1200);
-    const clientHeight = rect?.height || canvas.clientHeight || (typeof window !== 'undefined' ? window.innerHeight : 800);
+    const dim = canvasDimensionsRef.current;
+    const clientWidth = dim.width || (typeof window !== 'undefined' ? window.innerWidth : 1200);
+    const clientHeight = dim.height || (typeof window !== 'undefined' ? window.innerHeight : 800);
     if (!Number.isFinite(clientWidth) || !Number.isFinite(clientHeight) || clientWidth <= 0 || clientHeight <= 0) return;
 
     const validNodes = nodes.filter((n) => Number.isFinite(n.x) && Number.isFinite(n.y));
@@ -558,7 +766,7 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
     const scaleY = height / spanY;
     const rawScale = Math.min(scaleX, scaleY);
     const safeScale = Number.isFinite(rawScale) && rawScale > 0
-      ? Math.max(0.15, Math.min(0.85, rawScale))
+      ? Math.max(0.1, Math.min(1.2, rawScale))
       : 0.85;
 
     const targetX = clientWidth / 2 - ((minX + maxX) / 2) * safeScale;
@@ -569,7 +777,7 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
       y: Number.isFinite(targetY) ? targetY : clientHeight / 2.2,
       scale: safeScale
     });
-  }, [getCanvasRectDefensive]);
+  }, []);
 
   useEffect(() => {
     handleResetView();
@@ -619,6 +827,7 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
       const pHeight = parent.clientHeight || canvas.clientHeight || (typeof window !== 'undefined' ? window.innerHeight : 800);
       if (pWidth <= 0 || pHeight <= 0) return;
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      canvasDimensionsRef.current = { width: pWidth, height: pHeight, dpr };
       const targetW = Math.floor(pWidth * dpr);
       const targetH = Math.floor(pHeight * dpr);
       if (canvas.width !== targetW || canvas.height !== targetH) {
@@ -652,8 +861,8 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
       const activeEdges = bundledEdgesRef.current;
       const activeHoverId = hoveredNodeIdRef.current;
 
-      const width = canvas.clientWidth || canvas.parentElement?.clientWidth || (typeof window !== 'undefined' ? window.innerWidth : 1200);
-      const height = canvas.clientHeight || canvas.parentElement?.clientHeight || (typeof window !== 'undefined' ? window.innerHeight : 800);
+      const width = canvasDimensionsRef.current.width;
+      const height = canvasDimensionsRef.current.height;
       if (width <= 0 || height <= 0) {
         animFrameIdRef.current = requestAnimationFrame(render);
         return;
@@ -678,9 +887,9 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
         height / 2,
         maxDim
       );
-      baseGrad.addColorStop(0, '#040714');
-      baseGrad.addColorStop(0.5, '#02030a');
-      baseGrad.addColorStop(1, '#000000');
+      baseGrad.addColorStop(0, '#0B0E14');
+      baseGrad.addColorStop(0.5, '#070a10');
+      baseGrad.addColorStop(1, '#020308');
       ctx.fillStyle = baseGrad;
       ctx.fillRect(0, 0, width, height);
 
@@ -1180,11 +1389,6 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
     };
   }, [viewGraph, selectedNode]);
 
-  // Compute matching count for search bar feedback
-  const searchMatchCount = useMemo(() => {
-    if (!searchQuery.trim()) return 0;
-    return layoutTree.filter((n) => n.isMatch).length;
-  }, [layoutTree, searchQuery]);
 
   return (
     <div
@@ -1220,13 +1424,13 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
                   sidebarOpen ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
                 }`
           }
-          flex flex-col bg-slate-950/85 backdrop-blur-md border-r border-slate-800/80 text-slate-100
+          flex flex-col bg-[#0B0E14]/90 backdrop-blur-md border-r border-white/10 text-slate-100
         `}
         style={!isMobile ? { width: 'var(--sidebar-width, 320px)' } : undefined}
       >
         <div className="w-[320px] min-w-[320px] h-full flex flex-col overflow-hidden">
           {/* Sidebar Header & Brand Telemetry */}
-          <div className="p-4 border-b border-slate-800/80 bg-slate-950/90 flex flex-col gap-1.5 flex-shrink-0">
+          <div className="p-4 border-b border-white/10 bg-[#121824]/90 flex flex-col gap-1.5 flex-shrink-0">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <div className="w-7 h-7 rounded-lg bg-cyan-950/80 border border-cyan-500/50 flex items-center justify-center shadow-[0_0_12px_rgba(0,240,255,0.3)]">
@@ -1248,7 +1452,7 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
           </div>
 
           {/* Sticky Search & Filtering Section */}
-          <div className="p-3 border-b border-slate-800/80 bg-slate-950/70 backdrop-blur-sm flex-shrink-0">
+          <div className="p-3 border-b border-white/10 bg-[#0B0E14]/80 backdrop-blur-sm flex-shrink-0">
             <div className="relative w-full">
               <Search className="w-3.5 h-3.5 text-cyan-400 absolute left-3 top-2.5" />
               <input
@@ -1256,7 +1460,7 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Search concepts, authors..."
-                className="w-full rounded-lg pl-8 pr-7 py-1.5 text-xs text-white placeholder-slate-500 border transition-all duration-200 focus:outline-none focus:ring-1 focus:ring-cyan-400 bg-slate-900/90 border-slate-800 hover:border-slate-700"
+                className="w-full rounded-xl pl-8 pr-7 py-1.5 text-xs text-white placeholder-slate-500 border border-white/10 transition-all duration-200 focus:outline-none focus:ring-1 focus:ring-cyan-400 bg-[#121824]/90 hover:border-white/20"
               />
               {searchQuery && (
                 <button
@@ -1291,7 +1495,7 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
                   Telemetry & LoD
                 </span>
                 <span
-                  className="px-1.5 py-0.5 rounded text-[9px] font-mono font-medium bg-slate-900 border border-slate-800 text-cyan-300"
+                  className="px-1.5 py-0.5 rounded text-[9px] font-mono font-medium bg-[#121824] border border-white/10 text-cyan-300"
                   title={LOD_TIER_LABELS[currentLoDTier].description}
                 >
                   {LOD_TIER_LABELS[currentLoDTier].name}
@@ -1299,7 +1503,7 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
               </div>
 
               {/* Node Counters Card */}
-              <div className="bg-slate-900/60 rounded-lg p-2.5 border border-slate-800/80 space-y-1.5 font-mono text-xs">
+              <div className="bg-[#121824]/70 rounded-xl p-2.5 border border-white/10 space-y-1.5 font-mono text-xs">
                 <div className="flex items-center justify-between">
                   <span className="text-slate-400">Visible on Canvas:</span>
                   <span className="text-cyan-300 font-semibold">{layoutTree.length} nodes</span>
@@ -1313,7 +1517,7 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
                   </span>
                 </div>
                 {ingestedGraph.nodes.length > 0 && (
-                  <div className="flex items-center justify-between text-emerald-400 text-[11px] pt-1 border-t border-slate-800/60">
+                  <div className="flex items-center justify-between text-emerald-400 text-[11px] pt-1 border-t border-white/10">
                     <span>Ingested Documents:</span>
                     <span>
                       +{ingestedGraph.nodes.length} from{' '}
@@ -1328,7 +1532,7 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
                 <label className="text-[10px] font-mono uppercase tracking-wider text-slate-400 flex items-center gap-1">
                   <Sliders className="w-3 h-3 text-cyan-400" /> Density Mode
                 </label>
-                <div className="grid grid-cols-3 gap-1 bg-slate-900/80 p-1 rounded-lg border border-slate-800 text-[11px] font-mono">
+                <div className="grid grid-cols-3 gap-1 bg-[#121824]/90 p-1 rounded-xl border border-white/10 text-[11px] font-mono">
                   <button
                     type="button"
                     onClick={() => setDensityMode('smart')}
@@ -1461,12 +1665,12 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
             </div>
 
             {/* Section 3: Epistemic Taxonomy Legend */}
-            <div className="space-y-2 pt-2 border-t border-slate-800/80">
+            <div className="space-y-2 pt-2 border-t border-white/10">
               <h2 className="text-[11px] font-semibold tracking-wider uppercase text-slate-400 flex items-center gap-1.5">
                 <Compass className="w-3.5 h-3.5 text-purple-400" />
                 Epistemic Legend
               </h2>
-              <div className="bg-slate-900/40 rounded-lg p-2.5 border border-slate-800/60 space-y-1.5 text-[11px] font-mono">
+              <div className="bg-[#121824]/70 rounded-xl p-2.5 border border-white/10 space-y-1.5 text-[11px] font-mono">
                 <div className="flex items-center gap-2">
                   <span className="w-2.5 h-2.5 rounded-full bg-cyan-400 shadow-[0_0_6px_#22d3ee]" />
                   <span className="text-slate-300">Baseline Ontology</span>
@@ -1492,12 +1696,12 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
           </div>
 
           {/* Sidebar Footer Controls */}
-          <div className="p-3 border-t border-slate-800/80 bg-slate-950/90 flex items-center justify-between text-xs font-mono text-slate-400 flex-shrink-0">
+          <div className="p-3 border-t border-white/10 bg-[#121824]/90 flex items-center justify-between text-xs font-mono text-slate-400 flex-shrink-0">
             <span className="text-cyan-400/90">Zoom: {Math.round(viewport.scale * 100)}%</span>
             <button
               type="button"
               onClick={handleResetView}
-              className="px-2 py-1 rounded bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-cyan-300 hover:text-white transition flex items-center gap-1 active:scale-95 cursor-pointer"
+              className="px-2 py-1 rounded-lg bg-[#0B0E14] hover:bg-slate-800 border border-white/10 text-cyan-300 hover:text-white transition flex items-center gap-1 active:scale-95 cursor-pointer"
               title="Reset Viewport Center"
             >
               <Maximize2 className="w-3 h-3" />
@@ -1511,7 +1715,7 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
       <button
         type="button"
         onClick={() => setSidebarOpen((prev) => !prev)}
-        className="absolute top-4 z-40 w-8 h-8 rounded-full bg-slate-900/95 hover:bg-slate-800 border border-cyan-500/50 text-cyan-300 hover:text-white flex items-center justify-center shadow-[0_0_12px_rgba(0,240,255,0.3)] backdrop-blur-md transition-all duration-200 active:scale-95 cursor-pointer focus:outline-none focus:ring-2 focus:ring-cyan-500/50"
+        className="absolute top-4 z-40 w-8 h-8 rounded-full bg-[#0B0E14]/95 hover:bg-[#121824] border border-cyan-500/50 text-cyan-300 hover:text-white flex items-center justify-center shadow-[0_0_12px_rgba(0,240,255,0.3)] backdrop-blur-md transition-all duration-200 active:scale-95 cursor-pointer focus:outline-none focus:ring-2 focus:ring-cyan-500/50"
         style={{
           left: isMobile
             ? (sidebarOpen ? 'calc(320px - 14px)' : '14px')
@@ -1526,8 +1730,12 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
         />
       </button>
 
-      {/* 3. Main Graph Canvas Viewport Wrapper */}
-      <main ref={canvasContainerRef} className="relative w-full h-full overflow-hidden">
+      {/* 3. Main Graph Canvas Viewport Wrapper (CSS Containment strictly enforced for 60fps) */}
+      <main
+        ref={canvasContainerRef}
+        style={{ contain: 'strict' }}
+        className="relative w-full h-full overflow-hidden bg-[#0B0E14]"
+      >
         {/* Full-Viewport Cosmic Canvas */}
         <canvas
           ref={canvasRef}
@@ -1536,13 +1744,18 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
           onPointerUp={handlePointerUp}
           onPointerCancel={handlePointerUp}
           onClick={handleCanvasClick}
+          onDoubleClick={handleCanvasDoubleClick}
           data-node-count={layoutTree.length}
           tabIndex={0}
-          aria-label="Interactive topology graph. Enter inspects the root, arrow keys pan, plus and minus zoom, Home resets, Escape closes the inspector."
+          aria-label="Interactive topology graph. Enter inspects the root, arrow keys pan, plus and minus zoom, Home resets, Escape closes the inspector, Space pans canvas."
           onKeyDown={(event) => {
             if (event.key === 'Enter') {
-              setSelectedNode(layoutTree[0]);
-              setDrawerOpen(true);
+              if (selectedNode) {
+                setDrawerOpen(true);
+              } else if (layoutTree.length > 0) {
+                setSelectedNode(layoutTree[0]);
+                setDrawerOpen(true);
+              }
             } else if (event.key === 'Escape') {
               setDrawerOpen(false);
             } else if (event.key === 'Home') {
@@ -1552,8 +1765,8 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
               event.preventDefault();
               setViewport((v) => ({
                 ...v,
-                x: Number.isFinite(v.x) ? v.x + (event.key === 'ArrowLeft' ? 30 : event.key === 'ArrowRight' ? -30 : 0) : v.x,
-                y: Number.isFinite(v.y) ? v.y + (event.key === 'ArrowUp' ? 30 : event.key === 'ArrowDown' ? -30 : 0) : v.y
+                x: Number.isFinite(v.x) ? v.x + (event.key === 'ArrowLeft' ? 35 : event.key === 'ArrowRight' ? -35 : 0) : v.x,
+                y: Number.isFinite(v.y) ? v.y + (event.key === 'ArrowUp' ? 35 : event.key === 'ArrowDown' ? -35 : 0) : v.y
               }));
             } else if (['+', '=', '-'].includes(event.key)) {
               event.preventDefault();
@@ -1561,31 +1774,72 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
                 const curScale = Number.isFinite(v.scale) && v.scale > 0 ? v.scale : 0.85;
                 return {
                   ...v,
-                  scale: Math.min(3.8, Math.max(0.15, curScale * (event.key === '-' ? 0.89 : 1.12)))
+                  scale: Math.min(4.0, Math.max(0.1, curScale * (event.key === '-' ? 0.88 : 1.14)))
                 };
               });
             }
           }}
-          style={{ touchAction: 'none' }}
+          style={{ willChange: 'transform', touchAction: 'none' }}
           className="w-full h-full cursor-grab active:cursor-grabbing block focus-visible:outline focus-visible:outline-cyan-400"
         />
 
+        {/* Cosmic Glassmorphic Floating HUD (Minimap, Search & Auto-Pan, Layout Physics Sliders, Controls) */}
+        <CosmicFloatingHUD
+          nodes={layoutTree}
+          viewport={viewport}
+          canvasWidth={canvasDimensionsRef.current.width}
+          canvasHeight={canvasDimensionsRef.current.height}
+          searchQuery={searchQuery}
+          onSearchChange={setSearchQuery}
+          searchMatchCount={searchMatchCount}
+          matchingNodes={matchingNodes}
+          onSelectNode={(node) => {
+            setSelectedNode(node);
+            setDrawerOpen(true);
+          }}
+          onPanToWorld={handlePanToWorld}
+          layoutOptions={layoutOptions}
+          onLayoutOptionsChange={setLayoutOptions}
+          onOpenResetLayoutModal={handleOpenResetLayoutModal}
+          onResetView={handleResetView}
+          onZoomIn={() =>
+            setViewport((v) => ({ ...v, scale: Math.min(4.0, (Number.isFinite(v.scale) ? v.scale : 0.85) * 1.2) }))
+          }
+          onZoomOut={() =>
+            setViewport((v) => ({ ...v, scale: Math.max(0.1, (Number.isFinite(v.scale) ? v.scale : 0.85) * 0.8) }))
+          }
+          isFullscreen={isFullscreen}
+          onToggleFullscreen={async () => {
+            if (document.fullscreenElement) {
+              await document.exitFullscreen().catch(() => setIsFullscreen(false));
+            } else {
+              await containerRef.current?.requestFullscreen().catch(() => setIsFullscreen(true));
+            }
+          }}
+        />
+
         {/* Floating Quick Viewport Dock (Bottom-Right) */}
-        <div className="absolute bottom-5 right-5 z-30 flex items-center gap-2">
+        <div className="absolute bottom-5 right-5 z-20 flex items-center gap-2">
           <button
             type="button"
-            onClick={() => setViewport((v) => ({ ...v, scale: Math.min(v.scale * 1.2, 3.8) }))}
-            className="p-2.5 rounded-lg bg-zinc-950/80 text-cyan-300 border border-cyan-500/50 hover:border-cyan-400 backdrop-blur-md transition active:scale-95 cursor-pointer shadow-lg"
+            onClick={() =>
+              setViewport((v) => ({ ...v, scale: Math.min(4.0, (Number.isFinite(v.scale) ? v.scale : 0.85) * 1.2) }))
+            }
+            className="p-2.5 rounded-xl bg-[#0B0E14]/85 text-cyan-300 border border-white/10 hover:border-cyan-400/50 backdrop-blur-md transition active:scale-95 cursor-pointer shadow-lg"
             title="Zoom In (+)"
+            aria-label="Zoom in"
           >
             <ZoomIn className="w-4 h-4" />
           </button>
 
           <button
             type="button"
-            onClick={() => setViewport((v) => ({ ...v, scale: Math.max(v.scale * 0.8, 0.15) }))}
-            className="p-2.5 rounded-lg bg-zinc-950/80 text-cyan-300 border border-cyan-500/50 hover:border-cyan-400 backdrop-blur-md transition active:scale-95 cursor-pointer shadow-lg"
+            onClick={() =>
+              setViewport((v) => ({ ...v, scale: Math.max(0.1, (Number.isFinite(v.scale) ? v.scale : 0.85) * 0.8) }))
+            }
+            className="p-2.5 rounded-xl bg-[#0B0E14]/85 text-cyan-300 border border-white/10 hover:border-cyan-400/50 backdrop-blur-md transition active:scale-95 cursor-pointer shadow-lg"
             title="Zoom Out (-)"
+            aria-label="Zoom out"
           >
             <ZoomOut className="w-4 h-4" />
           </button>
@@ -1593,8 +1847,9 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
           <button
             type="button"
             onClick={handleResetView}
-            className="p-2.5 rounded-lg bg-zinc-950/80 text-cyan-300 border border-cyan-500/50 hover:border-cyan-400 backdrop-blur-md transition active:scale-95 cursor-pointer shadow-lg"
+            className="p-2.5 rounded-xl bg-[#0B0E14]/85 text-cyan-300 border border-white/10 hover:border-cyan-400/50 backdrop-blur-md transition active:scale-95 cursor-pointer shadow-lg"
             title="Center Canvas (Home)"
+            aria-label="Center Canvas"
           >
             <Maximize2 className="w-4 h-4" />
           </button>
@@ -1603,28 +1858,29 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
             type="button"
             onClick={async () => {
               if (document.fullscreenElement) {
-                await document.exitFullscreen();
+                await document.exitFullscreen().catch(() => setIsFullscreen(false));
               } else {
                 await containerRef.current?.requestFullscreen().catch(() => setIsFullscreen(true));
               }
             }}
-            className="p-2.5 rounded-lg bg-zinc-950/80 text-purple-300 border border-purple-500/50 hover:border-purple-400 backdrop-blur-md transition active:scale-95 cursor-pointer shadow-lg"
+            className="p-2.5 rounded-xl bg-[#0B0E14]/85 text-purple-300 border border-white/10 hover:border-purple-400/50 backdrop-blur-md transition active:scale-95 cursor-pointer shadow-lg"
             title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
+            aria-label="Toggle Fullscreen"
           >
             {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
           </button>
         </div>
 
         {/* Canvas Navigation Hints & Zoom Scale (Bottom-Left) */}
-        <footer className="absolute bottom-4 left-4 z-20 flex flex-wrap items-center gap-2 text-[9px] sm:text-[11px] font-mono text-cyan-300/70 pointer-events-none">
-          <span className="hidden sm:inline px-2.5 py-1 rounded bg-black/75 backdrop-blur-md border border-cyan-500/30">
-            • Pan: Drag canvas
+        <footer className="absolute bottom-4 left-4 z-20 flex flex-wrap items-center gap-2 text-[9px] sm:text-[11px] font-mono text-cyan-300/80 pointer-events-none">
+          <span className="hidden sm:inline px-2.5 py-1 rounded-lg bg-[#0B0E14]/90 backdrop-blur-md border border-white/10 shadow-sm">
+            • Pan: Drag or Space+Drag
           </span>
-          <span className="hidden sm:inline px-2.5 py-1 rounded bg-black/75 backdrop-blur-md border border-cyan-500/30">
+          <span className="hidden sm:inline px-2.5 py-1 rounded-lg bg-[#0B0E14]/90 backdrop-blur-md border border-white/10 shadow-sm">
             • Zoom: Scroll wheel ({Math.round(viewport.scale * 100)}%)
           </span>
-          <span className="px-2.5 py-1 rounded bg-black/75 backdrop-blur-md border border-cyan-500/30">
-            • Inspect & Expand: Click node
+          <span className="px-2.5 py-1 rounded-lg bg-[#0B0E14]/90 backdrop-blur-md border border-white/10 shadow-sm">
+            • Focus: Double-click node
           </span>
         </footer>
 
@@ -1643,6 +1899,7 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
           allNodesMap={allNodesMap}
           isClusterExpanded={selectedNode ? expandedClusterIds.has(selectedNode.id) : false}
           onToggleClusterExpansion={handleToggleClusterExpansion}
+          onDeleteNode={handleDeleteNode}
         />
 
         {/* Document Ingestion Subsystem Modal */}
@@ -1661,6 +1918,18 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
           selectedNode={selectedNode}
           baselineTree={treeData}
           ingestedGraph={ingestedGraph}
+        />
+
+        {/* Universal Safe Confirm Modal for Node Deletion, Graph Clear, and Layout Reset */}
+        <ConfirmModal
+          isOpen={confirmModalConfig.isOpen}
+          title={confirmModalConfig.title}
+          message={confirmModalConfig.message}
+          itemDetails={confirmModalConfig.itemDetails}
+          confirmLabel={confirmModalConfig.confirmLabel}
+          confirmVariant={confirmModalConfig.confirmVariant}
+          onConfirm={confirmModalConfig.onConfirm}
+          onCancel={() => setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }))}
         />
       </main>
     </div>

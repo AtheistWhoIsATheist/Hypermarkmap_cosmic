@@ -243,6 +243,12 @@ export class ScreenSpaceLabelCuller {
   }
 }
 
+export interface LayoutPhysicsOptions {
+  forceStrength?: number;
+  linkDistance?: number;
+  collisionRadius?: number;
+}
+
 /**
  * Projects raw graph models into the active ViewGraph, applying progressive
  * folding, Phyllotaxis cluster packing, and cluster meta-edge aggregation.
@@ -256,6 +262,7 @@ export function projectViewGraph(params: {
   searchQuery: string;
   selectedNodeId: string | null;
   hoveredNodeId: string | null;
+  layoutOptions?: LayoutPhysicsOptions;
 }): {
   positionedNodes: PositionedVisualNode[];
   bundledEdges: BundledVisualEdge[];
@@ -269,8 +276,13 @@ export function projectViewGraph(params: {
     expandedClusterIds,
     searchQuery,
     selectedNodeId,
-    hoveredNodeId
+    hoveredNodeId,
+    layoutOptions
   } = params;
+
+  const forceMult = layoutOptions?.forceStrength ?? 1.0;
+  const linkDistMult = layoutOptions?.linkDistance ?? 1.0;
+  const collisionMult = layoutOptions?.collisionRadius != null ? Math.max(0.3, layoutOptions.collisionRadius / 28) : 1.0;
 
   const positioned: PositionedVisualNode[] = [];
   const qLower = searchQuery.toLowerCase().trim();
@@ -280,7 +292,12 @@ export function projectViewGraph(params: {
     ...treeData,
     x: 0,
     y: 0,
-    isMatch: qLower ? treeData.title.toLowerCase().includes(qLower) : false,
+    isMatch: Boolean(
+      qLower &&
+        (treeData.title.toLowerCase().includes(qLower) ||
+          (treeData.description && treeData.description.toLowerCase().includes(qLower)) ||
+          (treeData.thematicGroup && treeData.thematicGroup.toLowerCase().includes(qLower)))
+    ),
     priorityScore: 5000,
     clusterId: 'baseline_root',
     isClusterHub: true
@@ -305,13 +322,16 @@ export function projectViewGraph(params: {
       const span = (angleSpan * leafCount(child)) / (totalLeaves || 1);
       const theta = cursor + span / 2;
       cursor += span;
-      const radius = 240 + (depth - 1) * 165;
+      const radius = (240 + (depth - 1) * 165) * linkDistMult * forceMult;
       const cx = Math.cos(theta) * radius;
       const cy = Math.sin(theta) * radius;
 
       const isMatch = Boolean(
         qLower &&
           (child.title.toLowerCase().includes(qLower) ||
+            (child.description && child.description.toLowerCase().includes(qLower)) ||
+            (child.thematicGroup && child.thematicGroup.toLowerCase().includes(qLower)) ||
+            (child.systemStage && child.systemStage.toLowerCase().includes(qLower)) ||
             (child.quoteText && child.quoteText.toLowerCase().includes(qLower)))
       );
 
@@ -343,7 +363,7 @@ export function projectViewGraph(params: {
     const hubAngleStep = (Math.PI * 2) / hubCount;
 
     // Outer Celestial Orbit for Document Hubs (R_doc = 1150px to 1550px)
-    const baseOrbitalRadius = 1250;
+    const baseOrbitalRadius = 1250 * linkDistMult;
 
     docHubs.forEach((hub, hIdx) => {
       const fileNodes = nonHubs.filter((n) => n.sourceFile === hub.sourceFile);
@@ -434,7 +454,12 @@ export function projectViewGraph(params: {
       const secCount = sections.length;
       sections.forEach((sec, sIdx) => {
         // Position Section Hubs on a spacious phyllotaxis spiral around Document Hub
-        const secPosRel = computePhyllotaxisPosition(sIdx + 1, 46, 120, { x: hubX, y: hubY });
+        const secPosRel = computePhyllotaxisPosition(
+          sIdx + 1,
+          46 * collisionMult,
+          120 * linkDistMult * forceMult,
+          { x: hubX, y: hubY }
+        );
         const secX = secPosRel.x;
         const secY = secPosRel.y;
 
@@ -523,7 +548,12 @@ export function projectViewGraph(params: {
             return;
           }
 
-          const cPosRel = computePhyllotaxisPosition(cIdx + 1, 26, 48, { x: secX, y: secY });
+          const cPosRel = computePhyllotaxisPosition(
+            cIdx + 1,
+            26 * collisionMult,
+            48 * linkDistMult * forceMult,
+            { x: secX, y: secY }
+          );
           const isUnresolved = concept.nodeKind === 'unresolved-reference';
           const isProposition = concept.nodeKind === 'proposition' || concept.nodeKind === 'passage';
 
@@ -590,7 +620,12 @@ export function projectViewGraph(params: {
             return;
           }
 
-          const oPosRel = computePhyllotaxisPosition(oIdx + 1, 28, 90, { x: hubX, y: hubY });
+          const oPosRel = computePhyllotaxisPosition(
+            oIdx + 1,
+            28 * collisionMult,
+            90 * linkDistMult * forceMult,
+            { x: hubX, y: hubY }
+          );
           const isUnresolved = orphan.nodeKind === 'unresolved-reference';
           const isProposition = orphan.nodeKind === 'proposition' || orphan.nodeKind === 'passage';
 

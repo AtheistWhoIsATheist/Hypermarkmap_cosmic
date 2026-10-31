@@ -1024,10 +1024,10 @@ export class IngestionService {
         targetBaselineId = 'mm_orientation';
         relationType = 'develops';
       } else if (node.thematicGroup === 'Apophatic Dynamics') {
-        targetBaselineId = 'mm_apophatic_theology';
+        targetBaselineId = 'mm_existential_themes_nexus';
         relationType = 'articulates';
       } else if (node.thematicGroup === 'Phenomenological Void') {
-        targetBaselineId = 'mm_phenomenological_bracketting';
+        targetBaselineId = 'mm_existentialism_cluster';
         relationType = 'develops';
       } else if (node.thematicGroup === 'Historical Lineage') {
         targetBaselineId = 'mm_figure';

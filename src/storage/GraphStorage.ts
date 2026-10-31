@@ -50,6 +50,14 @@ function sanitizeNode(node: GraphNode): GraphNode {
   return node;
 }
 
+export const BASELINE_ID_ALIASES: Record<string, string> = {
+  mm_apophatic_theology: 'mm_existential_themes_nexus',
+  mm_phenomenological_bracketting: 'mm_existentialism_cluster',
+  mm_phenomenological_bracketing: 'mm_existentialism_cluster',
+  mm_nihilism: 'mm_nihilism_main_branch',
+  mm_existentialism: 'mm_existentialism_cluster'
+};
+
 function extractAllBaselineIds(root: EpistemicTopologyNode): Set<string> {
   const ids = new Set<string>();
   function walk(node: EpistemicTopologyNode) {
@@ -57,6 +65,8 @@ function extractAllBaselineIds(root: EpistemicTopologyNode): Set<string> {
     if (node.children) node.children.forEach(walk);
   }
   walk(root);
+  // Also register recognized aliases so they are validated and remapped
+  Object.keys(BASELINE_ID_ALIASES).forEach((alias) => ids.add(alias));
   return ids;
 }
 
@@ -212,7 +222,15 @@ class GraphStorageEngine {
 
         tx.objectStore('edges').getAll().onsuccess = (e) => {
           const edges = (e.target as IDBRequest<GraphEdge[]>).result || [];
-          edges.forEach(ed => this.cachedEdges.set(ed.id, ed));
+          edges.forEach((ed) => {
+            const targetId = BASELINE_ID_ALIASES[ed.target] || ed.target;
+            const sourceId = BASELINE_ID_ALIASES[ed.source] || ed.source;
+            const normalizedEd =
+              targetId !== ed.target || sourceId !== ed.source
+                ? { ...ed, source: sourceId, target: targetId }
+                : ed;
+            this.cachedEdges.set(normalizedEd.id, normalizedEd);
+          });
         };
 
         tx.objectStore('source_spans').getAll().onsuccess = (e) => {
@@ -299,7 +317,7 @@ class GraphStorageEngine {
   ): GraphEdge[] {
     const nodeIds = new Set<string>(this.cachedNodes.keys());
 
-    // Include all 50 baseline topology node IDs as valid targets/sources
+    // Include all baseline topology node IDs and aliases as valid endpoints
     for (const bId of this.allBaselineIds) {
       nodeIds.add(bId);
     }
@@ -309,7 +327,16 @@ class GraphStorageEngine {
     }
 
     const validEdges: GraphEdge[] = [];
-    for (const e of edges) {
+    for (const rawEdge of edges) {
+      // Normalize any alias targets/sources to canonical baseline IDs
+      const targetId = BASELINE_ID_ALIASES[rawEdge.target] || rawEdge.target;
+      const sourceId = BASELINE_ID_ALIASES[rawEdge.source] || rawEdge.source;
+
+      const e: GraphEdge =
+        targetId !== rawEdge.target || sourceId !== rawEdge.source
+          ? { ...rawEdge, source: sourceId, target: targetId }
+          : rawEdge;
+
       const hasSource = nodeIds.has(e.source);
       const hasTarget =
         nodeIds.has(e.target) ||
@@ -319,8 +346,6 @@ class GraphStorageEngine {
 
       if (hasSource && hasTarget) {
         validEdges.push(e);
-      } else {
-        console.warn(`[GraphStorage] Filtered orphaned edge ${e.id} (${e.source} -> ${e.target})`);
       }
     }
 
@@ -510,6 +535,43 @@ class GraphStorageEngine {
     this.cachedDocuments.clear();
     this.cachedSpans.clear();
     this.cachedHashes.clear();
+  }
+
+  /**
+   * Deletes a specific ingested node and its associated edges
+   */
+  public async deleteNode(nodeId: string): Promise<void> {
+    const db = await this.getDb();
+    if (db) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const tx = db.transaction(['nodes', 'edges'], 'readwrite');
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.objectStore('nodes').delete(nodeId);
+          const edgeStore = tx.objectStore('edges');
+          edgeStore.openCursor().onsuccess = (e) => {
+            const cursor = (e.target as IDBRequest<IDBCursorWithValue>).result;
+            if (cursor) {
+              const edge = cursor.value as GraphEdge;
+              if (edge.source === nodeId || edge.target === nodeId) {
+                cursor.delete();
+              }
+              cursor.continue();
+            }
+          };
+        });
+      } catch {
+        // Fallback to cache deletion
+      }
+    }
+
+    this.cachedNodes.delete(nodeId);
+    for (const [edgeId, edge] of this.cachedEdges.entries()) {
+      if (edge.source === nodeId || edge.target === nodeId) {
+        this.cachedEdges.delete(edgeId);
+      }
+    }
   }
 
   public async getDocument(docId: string): Promise<SourceDocument | undefined> {
