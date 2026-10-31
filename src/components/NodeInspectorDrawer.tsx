@@ -15,7 +15,8 @@ import {
   ChevronRight,
   Hash,
   Database,
-  Trash2
+  Trash2,
+  Edit2
 } from 'lucide-react';
 import type { NodeCitation, NodeMetadataRecord, EpistemicTopologyNode } from '../types';
 import { normalizeEpistemicNode } from './GroundedEpistemicTopologyData';
@@ -31,6 +32,7 @@ interface NodeInspectorDrawerProps {
   isClusterExpanded?: boolean;
   onToggleClusterExpansion?: (clusterId: string) => void;
   onDeleteNode?: (nodeId: string) => void;
+  onRenameNode?: (nodeId: string, newTitle: string) => void;
 }
 
 /**
@@ -186,21 +188,56 @@ export const NodeInspectorDrawer: React.FC<NodeInspectorDrawerProps> = ({
   allNodesMap,
   isClusterExpanded,
   onToggleClusterExpansion,
-  onDeleteNode
+  onDeleteNode,
+  onRenameNode
 }) => {
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const asideRef = useRef<HTMLElement | null>(null);
+  const editTitleInputRef = useRef<HTMLInputElement | null>(null);
 
   // Animation and mount lifecycle states
   const [isMounted, setIsMounted] = useState<boolean>(false);
   const [isVisible, setIsVisible] = useState<boolean>(false);
   const [copiedId, setCopiedId] = useState<boolean>(false);
   const [selectedMetaCategory, setSelectedMetaCategory] = useState<'all' | 'system' | 'epistemic' | 'relational'>('all');
+  const [isEditingTitle, setIsEditingTitle] = useState<boolean>(false);
+  const [draftTitle, setDraftTitle] = useState<string>('');
+  const [titleError, setTitleError] = useState<string | null>(null);
 
   // Normalize incoming node data defensibly
   const normalizedNode = useMemo(() => {
     return normalizeEpistemicNode(node);
   }, [node]);
+
+  // Synchronize draft title and reset edit mode when node changes
+  useEffect(() => {
+    if (normalizedNode) {
+      setDraftTitle(normalizedNode.title);
+      setIsEditingTitle(false);
+      setTitleError(null);
+    }
+  }, [normalizedNode?.id]);
+
+  // Auto-focus and select text when entering rename mode
+  useEffect(() => {
+    if (isEditingTitle) {
+      editTitleInputRef.current?.focus();
+      editTitleInputRef.current?.select();
+    }
+  }, [isEditingTitle]);
+
+  const handleCommitRename = useCallback(() => {
+    const trimmed = draftTitle.trim();
+    if (!trimmed) {
+      setTitleError('Title cannot be empty');
+      return;
+    }
+    if (onRenameNode && normalizedNode) {
+      onRenameNode(normalizedNode.id, trimmed);
+    }
+    setIsEditingTitle(false);
+    setTitleError(null);
+  }, [draftTitle, onRenameNode, normalizedNode]);
 
   // Synchronize slide-in/out transitions and DOM mounting
   useEffect(() => {
@@ -224,12 +261,22 @@ export const NodeInspectorDrawer: React.FC<NodeInspectorDrawerProps> = ({
     }
   }, [isOpen, normalizedNode?.id]);
 
-  // Escape key handler on document
+  // Escape and F2 key handler on document
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isOpen) {
+      if (!isOpen) return;
+      if (e.key === 'Escape') {
         e.preventDefault();
-        onClose();
+        if (isEditingTitle) {
+          setIsEditingTitle(false);
+          setDraftTitle(normalizedNode?.title || '');
+          setTitleError(null);
+        } else {
+          onClose();
+        }
+      } else if (e.key === 'F2' && onRenameNode && !isEditingTitle) {
+        e.preventDefault();
+        setIsEditingTitle(true);
       }
     };
     if (isOpen) {
@@ -238,7 +285,7 @@ export const NodeInspectorDrawer: React.FC<NodeInspectorDrawerProps> = ({
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [isOpen, onClose]);
+  }, [isOpen, onClose, isEditingTitle, normalizedNode?.title, onRenameNode]);
 
   // Copy node ID to clipboard
   const handleCopyId = useCallback(async () => {
@@ -352,10 +399,80 @@ export const NodeInspectorDrawer: React.FC<NodeInspectorDrawerProps> = ({
                 )}
               </div>
 
-              {/* Node Title */}
-              <h2 className="font-sans font-semibold tracking-wide text-slate-100 text-lg leading-snug break-words">
-                {normalizedNode.title}
-              </h2>
+              {/* Node Title / Inline Edit Form */}
+              {isEditingTitle ? (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    handleCommitRename();
+                  }}
+                  className="space-y-1 pt-0.5"
+                >
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      ref={editTitleInputRef}
+                      type="text"
+                      value={draftTitle}
+                      onChange={(e) => {
+                        setDraftTitle(e.target.value);
+                        if (titleError) setTitleError(null);
+                      }}
+                      className={`flex-1 px-2.5 py-1 text-sm font-sans font-semibold text-white bg-[#0B0E14] border rounded-lg transition outline-none ${
+                        titleError
+                          ? 'border-rose-500 focus:ring-1 focus:ring-rose-500'
+                          : 'border-white/20 focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400'
+                      }`}
+                      placeholder="Enter concept title..."
+                      aria-label="Edit node title"
+                    />
+                    <button
+                      type="submit"
+                      aria-label="Save title"
+                      title="Save title (Enter)"
+                      className="p-1.5 rounded-lg bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-500/50 text-emerald-300 hover:text-white transition cursor-pointer active:scale-95"
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsEditingTitle(false);
+                        setDraftTitle(normalizedNode.title);
+                        setTitleError(null);
+                      }}
+                      aria-label="Cancel editing"
+                      title="Cancel editing (Esc)"
+                      className="p-1.5 rounded-lg bg-[#0B0E14] hover:bg-slate-800 border border-white/10 text-slate-400 hover:text-white transition cursor-pointer active:scale-95"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  {titleError && (
+                    <p className="text-[10px] font-mono text-rose-400 pl-0.5">{titleError}</p>
+                  )}
+                </form>
+              ) : (
+                <div className="group/title flex items-center justify-between gap-2">
+                  <h2 className="font-sans font-semibold tracking-wide text-slate-100 text-lg leading-snug break-words flex-1">
+                    {normalizedNode.title}
+                  </h2>
+                  {onRenameNode && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsEditingTitle(true);
+                        setDraftTitle(normalizedNode.title);
+                        setTitleError(null);
+                      }}
+                      aria-label="Rename concept node (F2)"
+                      title="Rename node (F2)"
+                      className="opacity-60 group-hover/title:opacity-100 hover:opacity-100 p-1.5 rounded-lg text-slate-400 hover:text-cyan-300 hover:bg-slate-800/60 transition cursor-pointer"
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              )}
 
               {/* Micro-Indicator: Connectivity Count & Origin Source */}
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-mono text-slate-400 pt-0.5">
@@ -381,11 +498,11 @@ export const NodeInspectorDrawer: React.FC<NodeInspectorDrawerProps> = ({
             </div>
 
             <div className="flex items-center gap-1 shrink-0">
-              {onDeleteNode && normalizedNode.sourceFile && (
+              {onDeleteNode && normalizedNode.id !== 'markmap_root' && (
                 <button
                   type="button"
                   onClick={() => onDeleteNode(normalizedNode.id)}
-                  aria-label="Delete ingested node"
+                  aria-label="Delete node"
                   title="Delete node from graph"
                   className="p-1.5 rounded-lg text-rose-400 hover:text-rose-200 hover:bg-rose-950/60 border border-transparent hover:border-rose-500/40 focus:outline-none focus:ring-2 focus:ring-rose-500/50 transition shrink-0 active:scale-95 cursor-pointer"
                 >

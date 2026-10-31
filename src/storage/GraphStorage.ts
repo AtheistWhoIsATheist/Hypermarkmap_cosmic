@@ -538,9 +538,93 @@ class GraphStorageEngine {
   }
 
   /**
-   * Deletes a specific ingested node and its associated edges
+   * Retrieves count of incident edges for a node in synchronous cache
    */
-  public async deleteNode(nodeId: string): Promise<void> {
+  public countIncidentEdges(nodeId: string): number {
+    let count = 0;
+    for (const edge of this.cachedEdges.values()) {
+      if (edge.source === nodeId || edge.target === nodeId) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * Creates and persists a custom conceptual node with an optional initial incident edge
+   */
+  public async createCustomNode(node: GraphNode, parentEdge?: GraphEdge): Promise<void> {
+    const db = await this.getDb();
+    if (db) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const stores = parentEdge ? ['nodes', 'edges'] : ['nodes'];
+          const tx = db.transaction(stores, 'readwrite');
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.objectStore('nodes').put(node);
+          if (parentEdge) {
+            tx.objectStore('edges').put(parentEdge);
+          }
+        });
+      } catch {
+        // Graceful in-memory fallback
+      }
+    }
+
+    this.cachedNodes.set(node.id, node);
+    if (parentEdge) {
+      this.cachedEdges.set(parentEdge.id, parentEdge);
+    }
+  }
+
+  /**
+   * Updates a node's label and title atomically
+   */
+  public async updateNodeTitle(nodeId: string, newTitle: string): Promise<void> {
+    const trimmed = newTitle.trim();
+    if (!trimmed) return;
+
+    const existing = this.cachedNodes.get(nodeId);
+    if (!existing) return;
+
+    const updated: GraphNode = {
+      ...existing,
+      title: trimmed,
+      label: trimmed
+    };
+
+    const db = await this.getDb();
+    if (db) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const tx = db.transaction(['nodes'], 'readwrite');
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.objectStore('nodes').put(updated);
+        });
+      } catch {
+        // Fallback
+      }
+    }
+
+    this.cachedNodes.set(nodeId, updated);
+  }
+
+  /**
+   * Atomically deletes a node and all incident edges across IndexedDB and synchronous memory cache.
+   * Returns list of deleted incident edge IDs so callers can synchronize external React state.
+   */
+  public async deleteNodeWithCascade(nodeId: string): Promise<string[]> {
+    const deletedEdgeIds: string[] = [];
+
+    // Identify incident edges in cache
+    for (const [edgeId, edge] of this.cachedEdges.entries()) {
+      if (edge.source === nodeId || edge.target === nodeId) {
+        deletedEdgeIds.push(edgeId);
+      }
+    }
+
     const db = await this.getDb();
     if (db) {
       try {
@@ -550,16 +634,9 @@ class GraphStorageEngine {
           tx.onerror = () => reject(tx.error);
           tx.objectStore('nodes').delete(nodeId);
           const edgeStore = tx.objectStore('edges');
-          edgeStore.openCursor().onsuccess = (e) => {
-            const cursor = (e.target as IDBRequest<IDBCursorWithValue>).result;
-            if (cursor) {
-              const edge = cursor.value as GraphEdge;
-              if (edge.source === nodeId || edge.target === nodeId) {
-                cursor.delete();
-              }
-              cursor.continue();
-            }
-          };
+          for (const edgeId of deletedEdgeIds) {
+            edgeStore.delete(edgeId);
+          }
         });
       } catch {
         // Fallback to cache deletion
@@ -567,11 +644,18 @@ class GraphStorageEngine {
     }
 
     this.cachedNodes.delete(nodeId);
-    for (const [edgeId, edge] of this.cachedEdges.entries()) {
-      if (edge.source === nodeId || edge.target === nodeId) {
-        this.cachedEdges.delete(edgeId);
-      }
+    for (const edgeId of deletedEdgeIds) {
+      this.cachedEdges.delete(edgeId);
     }
+
+    return deletedEdgeIds;
+  }
+
+  /**
+   * Deletes a specific ingested node and its associated edges (alias to deleteNodeWithCascade)
+   */
+  public async deleteNode(nodeId: string): Promise<void> {
+    await this.deleteNodeWithCascade(nodeId);
   }
 
   public async getDocument(docId: string): Promise<SourceDocument | undefined> {

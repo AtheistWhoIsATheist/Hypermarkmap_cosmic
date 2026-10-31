@@ -4,9 +4,12 @@ import {
   getLoDTier,
   formatCanvasDisplayLabel,
   ScreenSpaceLabelCuller,
-  projectViewGraph
+  projectViewGraph,
+  isEditableElement,
+  getViewportCenterWorldCoords
 } from '../src/utils/graphSpatialEngine';
 import { MARKMAP_EPITEMIC_TOPOLOGY } from '../src/components/GroundedEpistemicTopologyData';
+import { GraphStorage } from '../src/storage/GraphStorage';
 import type { GraphNode, GraphEdge } from '../src/types/graph';
 
 async function runSpatialTests() {
@@ -183,8 +186,106 @@ async function runSpatialTests() {
     console.log('  ✓ PASS: getLoDTier and ScreenSpaceLabelCuller defensively reject non-finite/NaN camera values');
   }
 
+  // Test 7: isEditableElement Guard
+  {
+    assert.equal(isEditableElement(null), false, 'null target should not be editable');
+    assert.equal(isEditableElement(undefined as any), false, 'undefined target should not be editable');
+
+    const fakeDiv = { tagName: 'DIV', isContentEditable: false } as unknown as HTMLElement;
+    const fakeButton = { tagName: 'BUTTON', isContentEditable: false } as unknown as HTMLElement;
+    const fakeCanvas = { tagName: 'CANVAS', isContentEditable: false } as unknown as HTMLElement;
+    assert.equal(isEditableElement(fakeDiv), false, 'DIV should not be editable');
+    assert.equal(isEditableElement(fakeButton), false, 'BUTTON should not be editable');
+    assert.equal(isEditableElement(fakeCanvas), false, 'CANVAS should not be editable');
+
+    const fakeInput = { tagName: 'INPUT', isContentEditable: false } as unknown as HTMLElement;
+    const fakeTextarea = { tagName: 'TEXTAREA', isContentEditable: false } as unknown as HTMLElement;
+    const fakeSelect = { tagName: 'SELECT', isContentEditable: false } as unknown as HTMLElement;
+    const fakeEditableDiv = { tagName: 'DIV', isContentEditable: true } as unknown as HTMLElement;
+
+    assert.equal(isEditableElement(fakeInput), true, 'INPUT must be recognized as editable');
+    assert.equal(isEditableElement(fakeTextarea), true, 'TEXTAREA must be recognized as editable');
+    assert.equal(isEditableElement(fakeSelect), true, 'SELECT must be recognized as editable');
+    assert.equal(isEditableElement(fakeEditableDiv), true, 'contentEditable must be recognized as editable');
+    console.log('  ✓ PASS: isEditableElement accurately guards text inputs from canvas shortcut collisions');
+  }
+
+  // Test 8: getViewportCenterWorldCoords Screen-to-World Projection & Collision Avoidance
+  {
+    const dim = { width: 1000, height: 800 };
+    const transform = { x: 100, y: 100, k: 2 };
+    // Center is (500, 400); World coords = (500 - 100) / 2 = 200, (400 - 100) / 2 = 150
+    const coordsNoCollision = getViewportCenterWorldCoords(dim, transform, []);
+    assert.equal(coordsNoCollision.x, 200);
+    assert.equal(coordsNoCollision.y, 150);
+
+    // Collision avoidance: placing an existing node directly at (200, 150)
+    const existingNode = { x: 200, y: 150 };
+    const coordsWithCollision = getViewportCenterWorldCoords(dim, transform, [existingNode]);
+    const separation = Math.hypot(coordsWithCollision.x - existingNode.x, coordsWithCollision.y - existingNode.y);
+    assert(separation >= 36, `Collision separation should be >= 36px, got ${separation.toFixed(1)}px`);
+    console.log(`  ✓ PASS: getViewportCenterWorldCoords applies inverse affine projection and spirals out for collision avoidance (separation: ${separation.toFixed(1)}px)`);
+  }
+
+  // Test 9: GraphStorage Custom Entity Lifecycle & Cascade Deletion
+  {
+    const customNode: GraphNode = {
+      id: 'test_concept_node_1',
+      hash: 'hash_test_1',
+      label: 'Emergent Void Praxis',
+      title: 'Emergent Void Praxis',
+      nodeKind: 'concept',
+      thematicGroup: 'Epistemic Architecture',
+      mimeType: 'text/plain',
+      content: 'Synthesized dialectical concept node',
+      description: 'Synthesized dialectical concept node',
+      systemStage: 'Stage V: Praxis & Epistemic Synthesis',
+      sourceFile: 'User Workspace',
+      x: 200,
+      y: 150,
+      citations: [],
+      metadata: { 'Entity Type': 'Custom Concept' },
+      connectedNodeIds: ['mm_existential_themes_nexus'],
+      createdAt: Date.now()
+    };
+
+    const customEdge: GraphEdge = {
+      id: 'test_edge_1',
+      source: 'mm_existential_themes_nexus',
+      target: 'test_concept_node_1',
+      relationType: 'develops',
+      edgeCategory: 'philosophical',
+      label: 'connects_to',
+      weight: 1
+    };
+
+    // 1. Create custom node with parent edge
+    await GraphStorage.createCustomNode(customNode, customEdge);
+    const incidentCount = GraphStorage.countIncidentEdges('test_concept_node_1');
+    assert.equal(incidentCount, 1, 'Newly linked node should have exactly 1 incident edge');
+
+    // 2. Rename node title
+    await GraphStorage.updateNodeTitle('test_concept_node_1', '  Emergent Void Praxis (Amended)  ');
+    const storedGraph = GraphStorage.getIngestedGraphSync();
+    const renamed = storedGraph.nodes.find(n => n.id === 'test_concept_node_1');
+    assert(renamed, 'Node should exist in cache');
+    assert.equal(renamed.title, 'Emergent Void Praxis (Amended)', 'Title should be trimmed and updated');
+    assert.equal(renamed.label, 'Emergent Void Praxis (Amended)', 'Label should match title');
+
+    // 3. Atomically delete with cascade
+    const deletedEdgeIds = await GraphStorage.deleteNodeWithCascade('test_concept_node_1');
+    assert(deletedEdgeIds.includes('test_edge_1'), 'Incident edge must be cascade deleted');
+
+    const remainingGraph = GraphStorage.getIngestedGraphSync();
+    assert.equal(remainingGraph.nodes.some(n => n.id === 'test_concept_node_1'), false, 'Node must be removed from cache');
+    assert.equal(remainingGraph.edges.some(e => e.id === 'test_edge_1'), false, 'Edge must be removed from cache');
+    assert.equal(GraphStorage.countIncidentEdges('test_concept_node_1'), 0, 'Zero incident edges must remain');
+
+    console.log('  ✓ PASS: GraphStorage creates custom nodes, validates atomic renames, and executes cascade edge deletions with zero orphans');
+  }
+
   console.log('---------------------------------------------------------------');
-  console.log('  ALL SPATIAL TESTS PASSED (6 / 6)');
+  console.log('  ALL SPATIAL TESTS PASSED (9 / 9)');
   console.log('===============================================================');
 }
 

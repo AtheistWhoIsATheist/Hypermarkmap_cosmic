@@ -31,7 +31,8 @@ import {
   Layers,
   Compass,
   FileText,
-  Activity
+  Activity,
+  PlusCircle
 } from 'lucide-react';
 import {
   MARKMAP_EPITEMIC_TOPOLOGY,
@@ -42,6 +43,7 @@ import { IngestionModal } from './IngestionModal';
 import { GoogleWorkspaceModal } from './GoogleWorkspaceModal';
 import { ConfirmModal } from './ConfirmModal';
 import { CosmicFloatingHUD } from './CosmicFloatingHUD';
+import { CreateNodeModal, type CreateNodeFormData } from './CreateNodeModal';
 import { subscribeAuthState, getCurrentUser } from '../services/workspace/authService';
 import { GraphStorage } from '../storage/GraphStorage';
 import type { GraphNode, GraphEdge, IngestionBatchItem } from '../types/graph';
@@ -56,6 +58,8 @@ import {
   formatCanvasDisplayLabel,
   ScreenSpaceLabelCuller,
   projectViewGraph,
+  isEditableElement,
+  getViewportCenterWorldCoords,
   type PositionedVisualNode,
   type BundledVisualEdge,
   type ScreenRect
@@ -142,6 +146,8 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
   // Interactive UI State
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedNode, setSelectedNode] = useState<EpistemicTopologyNode | null>(null);
+  const selectedNodeRef = useRef(selectedNode);
+  selectedNodeRef.current = selectedNode;
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const hoveredNodeIdRef = useRef<string | null>(null);
   hoveredNodeIdRef.current = hoveredNodeId;
@@ -149,6 +155,8 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [isIngestionOpen, setIsIngestionOpen] = useState(false);
   const [isWorkspaceOpen, setIsWorkspaceOpen] = useState(false);
+  const [isCreateNodeOpen, setIsCreateNodeOpen] = useState(false);
+  const [customRenames, setCustomRenames] = useState<Record<string, string>>({});
   const [googleUser, setGoogleUser] = useState<User | null>(() => getCurrentUser());
 
   // Confirm Modal state for graph clear, layout reset, and node deletion
@@ -394,16 +402,18 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
   const allNodesMap = useMemo(() => {
     const map = new Map<string, EpistemicTopologyNode>();
     const traverse = (n: EpistemicTopologyNode) => {
-      map.set(n.id, n);
+      const renamedTitle = customRenames[n.id] || n.title;
+      map.set(n.id, renamedTitle !== n.title ? { ...n, title: renamedTitle } : n);
       if (n.children) n.children.forEach(traverse);
     };
     traverse(treeData);
 
-    // Index all ingested nodes
+    // Index all ingested and custom nodes
     ingestedGraph.nodes.forEach((n) => {
+      const activeTitle = customRenames[n.id] || n.title || n.label;
       map.set(n.id, {
         id: n.id,
-        title: n.title || n.label,
+        title: activeTitle,
         description: n.description || n.content,
         systemStage: n.systemStage,
         thematicGroup: n.thematicGroup,
@@ -425,7 +435,7 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
     });
 
     return map;
-  }, [treeData, ingestedGraph.nodes]);
+  }, [treeData, ingestedGraph.nodes, customRenames]);
 
   // Toggle expansion of an individual Document or Section Hub
   const handleToggleClusterExpansion = useCallback((clusterId: string) => {
@@ -462,22 +472,149 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
     setViewport((v) => ({ ...v, x: targetX, y: targetY }));
   }, []);
 
-  // Delete an individual ingested node with confirmation modal
+  // Create custom conceptual node with screen-to-world projection and optional parent edge
+  const handleCreateNode = useCallback(
+    async (formData: CreateNodeFormData) => {
+      const trimmedTitle = formData.title.trim();
+      if (!trimmedTitle) return;
+
+      const dim = canvasDimensionsRef.current;
+      const vp = viewportRef.current;
+      const worldCoords = getViewportCenterWorldCoords(
+        dim,
+        { x: vp.x, y: vp.y, k: vp.scale },
+        layoutTreeRef.current
+      );
+
+      const newId = `node_custom_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const customNode: GraphNode = {
+        id: newId,
+        hash: newId,
+        label: trimmedTitle,
+        title: trimmedTitle,
+        nodeKind: formData.category === 'unresolved' ? 'unresolved-reference' : 'concept',
+        thematicGroup:
+          formData.category === 'supernode'
+            ? 'Epistemic Architecture'
+            : formData.category === 'tension'
+            ? 'Nihilistic Pivot'
+            : formData.category === 'baseline'
+            ? 'Historical Lineage'
+            : formData.category === 'unresolved'
+            ? 'Unclassified / Pending Review'
+            : 'Epistemic Architecture',
+        mimeType: 'text/plain',
+        content: formData.description?.trim() || trimmedTitle,
+        description:
+          formData.description?.trim() || `User-created conceptual node: ${trimmedTitle}`,
+        systemStage: 'Stage V: Praxis & Epistemic Synthesis',
+        sourceFile: 'User Workspace',
+        x: worldCoords.x,
+        y: worldCoords.y,
+        citations: [],
+        metadata: {
+          'Entity Type': 'Custom Concept',
+          'Created At': new Date().toISOString(),
+          'Epistemic Taxonomy': formData.category
+        },
+        connectedNodeIds: formData.parentId ? [formData.parentId] : [],
+        createdAt: Date.now()
+      };
+
+      let customEdge: GraphEdge | undefined;
+      if (formData.parentId) {
+        customEdge = {
+          id: `edge_custom_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          source: formData.parentId,
+          target: newId,
+          relationType: 'develops',
+          edgeCategory: 'philosophical',
+          label: 'connects_to',
+          weight: 1
+        };
+      }
+
+      await GraphStorage.createCustomNode(customNode, customEdge);
+      setIngestedGraph((prev) => ({
+        nodes: [...prev.nodes, customNode],
+        edges: customEdge ? [...prev.edges, customEdge] : prev.edges
+      }));
+
+      setIsCreateNodeOpen(false);
+
+      // Smooth auto-pan to newly created entity
+      handlePanToWorld(worldCoords.x, worldCoords.y);
+
+      // Select and focus inspector
+      setSelectedNode({
+        id: customNode.id,
+        title: customNode.title || customNode.label,
+        description: customNode.description,
+        systemStage: customNode.systemStage,
+        thematicGroup: customNode.thematicGroup,
+        citations: [],
+        metadata: [
+          { label: 'Entity Type', value: 'Custom Concept', category: 'epistemic' },
+          { label: 'Created At', value: new Date().toLocaleTimeString(), category: 'epistemic' }
+        ],
+        connectedNodeIds: customNode.connectedNodeIds,
+        nodeKind: customNode.nodeKind,
+        sourceFile: customNode.sourceFile
+      });
+      setDrawerOpen(true);
+    },
+    [handlePanToWorld]
+  );
+
+  // In-line rename node handler with atomic storage commit
+  const handleRenameNode = useCallback(async (nodeId: string, newTitle: string) => {
+    const trimmed = newTitle.trim();
+    if (!trimmed) return;
+
+    await GraphStorage.updateNodeTitle(nodeId, trimmed);
+
+    setCustomRenames((prev) => ({ ...prev, [nodeId]: trimmed }));
+
+    setIngestedGraph((prev) => ({
+      ...prev,
+      nodes: prev.nodes.map((n) =>
+        n.id === nodeId ? { ...n, title: trimmed, label: trimmed } : n
+      )
+    }));
+
+    setSelectedNode((prev) => (prev && prev.id === nodeId ? { ...prev, title: trimmed } : prev));
+  }, []);
+
+  // Delete an individual node with atomic cascade edge pruning and confirmation modal
   const handleDeleteNode = useCallback(
     (nodeId: string) => {
+      if (nodeId === 'markmap_root') return;
       const target = allNodesMap.get(nodeId);
       if (!target) return;
+
+      const incidentCount = GraphStorage.countIncidentEdges(nodeId);
+
       setConfirmModalConfig({
         isOpen: true,
         title: 'Delete Epistemic Node?',
-        message: `Remove "${target.title}" and its connected relationships from the active graph?`,
-        itemDetails: [`Node ID: ${target.id}`, `Source: ${target.sourceFile || 'Ingested Node'}`],
+        message: `Are you sure you want to delete "${target.title}"? This will atomically delete the node and ${incidentCount} connected edge${incidentCount === 1 ? '' : 's'} across the system.`,
+        itemDetails: [
+          `Node ID: ${target.id}`,
+          `Source: ${target.sourceFile || 'Custom / Ingested Node'}`,
+          `Incident Edges: ${incidentCount}`
+        ],
         confirmLabel: 'Delete Node',
         confirmVariant: 'danger',
         onConfirm: async () => {
           setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
-          await GraphStorage.deleteNode(nodeId);
-          setIngestedGraph(GraphStorage.getIngestedGraphSync());
+          const deletedEdgeIds = await GraphStorage.deleteNodeWithCascade(nodeId);
+          const deletedEdgeSet = new Set(deletedEdgeIds);
+          setIngestedGraph((prev) => ({
+            nodes: prev.nodes.filter((n) => n.id !== nodeId),
+            edges: prev.edges.filter(
+              (e) => e.source !== nodeId && e.target !== nodeId && !deletedEdgeSet.has(e.id)
+            )
+          }));
           setSelectedNode(null);
           setDrawerOpen(false);
         }
@@ -621,12 +758,52 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
     return () => canvas.removeEventListener('wheel', handleWheel);
   }, [handleWheel]);
 
+  const handleResetView = useCallback(() => {
+    const canvas = canvasRef.current;
+    const nodes = layoutTreeRef.current;
+    if (!canvas || !nodes || nodes.length === 0) return;
+    const dim = canvasDimensionsRef.current;
+    const clientWidth = dim.width || (typeof window !== 'undefined' ? window.innerWidth : 1200);
+    const clientHeight = dim.height || (typeof window !== 'undefined' ? window.innerHeight : 800);
+    if (!Number.isFinite(clientWidth) || !Number.isFinite(clientHeight) || clientWidth <= 0 || clientHeight <= 0) return;
+
+    const validNodes = nodes.filter((n) => Number.isFinite(n.x) && Number.isFinite(n.y));
+    if (validNodes.length === 0) return;
+
+    const xs = validNodes.map((n) => n.x);
+    const ys = validNodes.map((n) => n.y);
+    const minX = Math.min(...xs) - 80;
+    const maxX = Math.max(...xs) + 180;
+    const minY = Math.min(...ys) - 80;
+    const maxY = Math.max(...ys) + 80;
+
+    const spanX = Math.max(120, maxX - minX);
+    const spanY = Math.max(120, maxY - minY);
+    const height = Math.max(160, clientHeight - 80);
+    const scaleX = (clientWidth - 48) / spanX;
+    const scaleY = height / spanY;
+    const rawScale = Math.min(scaleX, scaleY);
+    const safeScale = Number.isFinite(rawScale) && rawScale > 0
+      ? Math.max(0.1, Math.min(1.2, rawScale))
+      : 0.85;
+
+    const targetX = clientWidth / 2 - ((minX + maxX) / 2) * safeScale;
+    const targetY = clientHeight / 2 - ((minY + maxY) / 2) * safeScale;
+
+    setViewport({
+      x: Number.isFinite(targetX) ? targetX : clientWidth / 2.8,
+      y: Number.isFinite(targetY) ? targetY : clientHeight / 2.2,
+      scale: safeScale
+    });
+  }, []);
+
   // Space-to-pan & Global Keyboard Shortcuts Listener
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+      if (isEditableElement(e.target)) {
         return;
       }
+
       if (e.code === 'Space') {
         e.preventDefault();
         if (!isSpaceHeldRef.current) {
@@ -638,12 +815,28 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
         }
       } else if (e.key === 'Escape') {
         setDrawerOpen(false);
+        setIsCreateNodeOpen(false);
         setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
         setSearchQuery('');
         canvasRef.current?.focus();
       } else if (e.key === 'Home') {
         e.preventDefault();
         handleResetView();
+      } else if ((e.key === 'n' || e.key === 'N') && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        setIsCreateNodeOpen(true);
+      } else if (e.key === 'Delete' || e.key === 'Backspace') {
+        const curSelected = selectedNodeRef.current;
+        if (curSelected && curSelected.id !== 'markmap_root') {
+          e.preventDefault();
+          handleDeleteNode(curSelected.id);
+        }
+      } else if (e.key === 'F2') {
+        const curSelected = selectedNodeRef.current;
+        if (curSelected) {
+          e.preventDefault();
+          setDrawerOpen(true);
+        }
       }
     };
 
@@ -663,7 +856,7 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, []);
+  }, [handleDeleteNode, handleResetView]);
 
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (dragDistanceRef.current > 4 || isSpaceHeldRef.current) return;
@@ -739,45 +932,6 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
       handleResetView();
     }
   };
-
-  const handleResetView = useCallback(() => {
-    const canvas = canvasRef.current;
-    const nodes = layoutTreeRef.current;
-    if (!canvas || !nodes || nodes.length === 0) return;
-    const dim = canvasDimensionsRef.current;
-    const clientWidth = dim.width || (typeof window !== 'undefined' ? window.innerWidth : 1200);
-    const clientHeight = dim.height || (typeof window !== 'undefined' ? window.innerHeight : 800);
-    if (!Number.isFinite(clientWidth) || !Number.isFinite(clientHeight) || clientWidth <= 0 || clientHeight <= 0) return;
-
-    const validNodes = nodes.filter((n) => Number.isFinite(n.x) && Number.isFinite(n.y));
-    if (validNodes.length === 0) return;
-
-    const xs = validNodes.map((n) => n.x);
-    const ys = validNodes.map((n) => n.y);
-    const minX = Math.min(...xs) - 80;
-    const maxX = Math.max(...xs) + 180;
-    const minY = Math.min(...ys) - 80;
-    const maxY = Math.max(...ys) + 80;
-
-    const spanX = Math.max(120, maxX - minX);
-    const spanY = Math.max(120, maxY - minY);
-    const height = Math.max(160, clientHeight - 80);
-    const scaleX = (clientWidth - 48) / spanX;
-    const scaleY = height / spanY;
-    const rawScale = Math.min(scaleX, scaleY);
-    const safeScale = Number.isFinite(rawScale) && rawScale > 0
-      ? Math.max(0.1, Math.min(1.2, rawScale))
-      : 0.85;
-
-    const targetX = clientWidth / 2 - ((minX + maxX) / 2) * safeScale;
-    const targetY = clientHeight / 2 - ((minY + maxY) / 2) * safeScale;
-
-    setViewport({
-      x: Number.isFinite(targetX) ? targetX : clientWidth / 2.8,
-      y: Number.isFinite(targetY) ? targetY : clientHeight / 2.2,
-      scale: safeScale
-    });
-  }, []);
 
   useEffect(() => {
     handleResetView();
@@ -1581,6 +1735,25 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
               </h2>
 
               <div className="space-y-2">
+                {/* Add Concept Entity Button */}
+                <button
+                  type="button"
+                  onClick={() => setIsCreateNodeOpen(true)}
+                  className="w-full py-2 px-3 rounded-lg text-xs font-semibold text-indigo-200 border transition-all duration-200 hover:text-white flex items-center justify-between active:scale-[0.98] cursor-pointer group"
+                  style={{
+                    backgroundColor: 'rgba(49, 46, 129, 0.75)',
+                    borderColor: 'rgba(129, 140, 248, 0.8)',
+                    boxShadow: '0 0 12px rgba(99, 102, 241, 0.25)'
+                  }}
+                  title="Add conceptual entity node to topology (N / Alt+N)"
+                >
+                  <span className="flex items-center gap-2">
+                    <PlusCircle className="w-4 h-4 text-indigo-400 group-hover:scale-110 transition-transform" />
+                    <span>Add Concept Node</span>
+                  </span>
+                  <span className="text-[10px] font-mono text-indigo-300/80 uppercase">N</span>
+                </button>
+
                 {/* Primary Document Ingestion Button */}
                 <button
                   type="button"
@@ -1816,6 +1989,7 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
               await containerRef.current?.requestFullscreen().catch(() => setIsFullscreen(true));
             }
           }}
+          onOpenCreateNode={() => setIsCreateNodeOpen(true)}
         />
 
         {/* Floating Quick Viewport Dock (Bottom-Right) */}
@@ -1900,6 +2074,16 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
           isClusterExpanded={selectedNode ? expandedClusterIds.has(selectedNode.id) : false}
           onToggleClusterExpansion={handleToggleClusterExpansion}
           onDeleteNode={handleDeleteNode}
+          onRenameNode={handleRenameNode}
+        />
+
+        {/* Create Concept Node Modal */}
+        <CreateNodeModal
+          isOpen={isCreateNodeOpen}
+          onClose={() => setIsCreateNodeOpen(false)}
+          onSubmit={handleCreateNode}
+          availableNodes={layoutTree.map((n) => ({ id: n.id, title: n.title }))}
+          defaultParentId={selectedNode?.id}
         />
 
         {/* Document Ingestion Subsystem Modal */}

@@ -14,7 +14,8 @@ import {
   Map as MapIcon,
   ChevronLeft,
   ChevronRight,
-  Layers
+  Layers,
+  PlusCircle
 } from 'lucide-react';
 import { CosmicMinimap } from './CosmicMinimap';
 import type { PositionedVisualNode, ViewportCamera, LayoutPhysicsOptions } from '../utils/graphSpatialEngine';
@@ -38,6 +39,7 @@ interface CosmicFloatingHUDProps {
   onZoomOut: () => void;
   isFullscreen: boolean;
   onToggleFullscreen: () => void;
+  onOpenCreateNode?: () => void;
 }
 
 export const CosmicFloatingHUD: React.FC<CosmicFloatingHUDProps> = ({
@@ -58,7 +60,8 @@ export const CosmicFloatingHUD: React.FC<CosmicFloatingHUDProps> = ({
   onZoomIn,
   onZoomOut,
   isFullscreen,
-  onToggleFullscreen
+  onToggleFullscreen,
+  onOpenCreateNode
 }) => {
   const [isHudExpanded, setIsHudExpanded] = useState(true);
   const [showMinimap, setShowMinimap] = useState(true);
@@ -105,6 +108,19 @@ export const CosmicFloatingHUD: React.FC<CosmicFloatingHUDProps> = ({
           </div>
 
           <div className="flex items-center gap-1.5">
+            {onOpenCreateNode && (
+              <button
+                type="button"
+                onClick={onOpenCreateNode}
+                className="px-2 py-1 rounded-lg border border-indigo-500/40 bg-indigo-950/70 hover:bg-indigo-900/80 text-indigo-200 text-xs font-medium transition cursor-pointer flex items-center gap-1 shadow-sm active:scale-95"
+                title="Add Concept Node (N)"
+                aria-label="Add Concept Node"
+              >
+                <PlusCircle className="w-3.5 h-3.5 text-indigo-400" />
+                <span className="hidden sm:inline text-[11px]">Concept</span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={() => setShowMinimap((prev) => !prev)}

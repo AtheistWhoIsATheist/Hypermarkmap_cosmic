@@ -676,6 +676,67 @@ export function projectViewGraph(params: {
         currentStats.hidden = hiddenInCluster;
       }
     });
+
+    // Handle standalone or custom concept nodes not attached to an ingested docHub
+    const positionedIds = new Set(positioned.map((p) => p.id));
+    const standaloneNodes = ingestedGraph.nodes.filter((n) => !positionedIds.has(n.id));
+    if (standaloneNodes.length > 0) {
+      standaloneNodes.forEach((sNode, sIdx) => {
+        let posX = sNode.x;
+        let posY = sNode.y;
+
+        if (typeof posX !== 'number' || typeof posY !== 'number' || !Number.isFinite(posX) || !Number.isFinite(posY)) {
+          const sPosRel = computePhyllotaxisPosition(
+            sIdx + 1,
+            36 * collisionMult,
+            160 * linkDistMult * forceMult,
+            { x: 0, y: 0 }
+          );
+          posX = sPosRel.x;
+          posY = sPosRel.y;
+        }
+
+        const isMatch = Boolean(
+          qLower &&
+            ((sNode.title && sNode.title.toLowerCase().includes(qLower)) ||
+              (sNode.label && sNode.label.toLowerCase().includes(qLower)) ||
+              (sNode.description && sNode.description.toLowerCase().includes(qLower)))
+        );
+
+        positioned.push({
+          id: sNode.id,
+          title: sNode.title || sNode.label,
+          description: sNode.description || sNode.content,
+          systemStage: sNode.systemStage || 'Stage V: Praxis & Epistemic Synthesis',
+          thematicGroup: sNode.thematicGroup || 'Epistemic Architecture',
+          citations: (sNode.citations || []).map((c, i) =>
+            typeof c === 'string' ? { id: `cit_${i}`, sourceTitle: sNode.sourceFile, quoteSnippet: c } : c
+          ),
+          metadata: Object.entries(sNode.metadata || {}).map(([l, v]) => ({
+            label: l,
+            value: v,
+            category: 'epistemic' as const
+          })),
+          connectedNodeIds: sNode.connectedNodeIds || [],
+          level: sNode.level || 2,
+          type: sNode.nodeKind || 'concept',
+          radius: sNode.radius || 13,
+          color: sNode.color || '#818cf8',
+          glowColor: sNode.glowColor || 'rgba(129, 140, 248, 0.45)',
+          x: posX,
+          y: posY,
+          isMatch,
+          parent: rootPos,
+          nodeKind: sNode.nodeKind || 'concept',
+          processingMode: sNode.processingMode || 'STRUCTURALLY_INGESTED',
+          confidenceStatus: sNode.confidenceStatus || 'source-explicit',
+          sourceSpans: sNode.sourceSpans,
+          sourceFile: sNode.sourceFile || 'User Defined',
+          clusterId: 'custom_nodes',
+          priorityScore: 3500
+        });
+      });
+    }
   }
 
   // Step 3: Priority Scoring Boosts for Selected / Hovered / High-Degree Nodes
@@ -769,3 +830,56 @@ export function projectViewGraph(params: {
     clusterCounts
   };
 }
+
+/**
+  * Global Keyboard Guard Subroutine:
+  * Detects if the event target is an active input, textarea, select, or contenteditable element.
+  */
+export const isEditableElement = (target: EventTarget | null): boolean => {
+  if (!target) return false;
+  if (typeof HTMLElement !== 'undefined' && !(target instanceof HTMLElement)) {
+    return false;
+  }
+  const el = target as { tagName?: string; isContentEditable?: boolean };
+  if (!el.tagName || typeof el.tagName !== 'string') return false;
+  const tag = el.tagName.toLowerCase();
+  return tag === 'input' || tag === 'textarea' || tag === 'select' || Boolean(el.isContentEditable);
+};
+
+/**
+  * Inverse Affine Screen-to-World Spawn Projection:
+  * Computes un-projected world coordinates from viewport center with deterministic collision avoidance.
+  */
+export const getViewportCenterWorldCoords = (
+  dimensions: { width: number; height: number },
+  transform: { x: number; y: number; k: number },
+  existingNodes: Array<{ x?: number; y?: number }> = []
+): { x: number; y: number } => {
+  const safeWidth = dimensions.width > 0 ? dimensions.width : 800;
+  const safeHeight = dimensions.height > 0 ? dimensions.height : 600;
+  const safeScale = Number.isFinite(transform.k) && transform.k >= 0.1 ? transform.k : 1;
+
+  let worldX = (safeWidth / 2 - transform.x) / safeScale;
+  let worldY = (safeHeight / 2 - transform.y) / safeScale;
+
+  // Deterministic collision avoidance against existing node centers
+  let attempt = 0;
+  const minSeparation = 36;
+  while (
+    attempt < 12 &&
+    existingNodes.some(
+      (n) =>
+        typeof n.x === 'number' &&
+        typeof n.y === 'number' &&
+        Math.hypot(n.x - worldX, n.y - worldY) < minSeparation
+    )
+  ) {
+    attempt += 1;
+    const angle = attempt * 1.15;
+    const radius = attempt * 18;
+    worldX += Math.cos(angle) * radius;
+    worldY += Math.sin(angle) * radius;
+  }
+
+  return { x: Math.round(worldX), y: Math.round(worldY) };
+};
