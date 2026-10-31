@@ -395,7 +395,7 @@ Author Person remarks that this pessimistic assessment is incomplete.`;
     for (let i = 0; i < 12; i++) {
       blobParts.push(blobChunk);
     }
-    const largeFile = new File(blobParts, 'corpus-archive.txt', { type: 'text/plain' });
+    const largeFile = new File(blobParts as unknown as BlobPart[], 'corpus-archive.txt', { type: 'text/plain' });
     assert.strictEqual(largeFile.size, tenMb, 'File should be exactly 12 MB');
 
     // 1. Validate header inspection runs on 64-byte slice

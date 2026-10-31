@@ -1,7 +1,8 @@
 /**
  * Grounded Epistemic Topology Data Definition
- * 100% faithful representation of the JOURNAL314 Ω Hypermarkmap structure from image_0.png,
- * fully mapped to the 1,808-node canonical SQLite database.
+ * Curated canonical baseline topology skeleton (50 primary and secondary thematic hub coordinates)
+ * representing the core Journal314 ontological architecture, dynamically extensible via client-side
+ * document ingestion and custom conceptual entity creation.
  */
 
 import type { NodeCitation, NodeMetadataRecord, EpistemicTopologyNode, RenderedEpistemicNode } from '../types';

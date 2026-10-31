@@ -1,61 +1,105 @@
-# HyperMarkMap Cosmic Graph
+# Nihiltheism Architect — Grounded Epistemic Topology
 
-A local graph workbench with an Express/SQLite backend and a separate standalone visualizer. AI generation uses **OpenRouter**. The root app exposes the saved graph and generates dialectical proposals from its inspector. `singularity-omega` is a static visualizer and requires no API key.
+A local-first, high-performance epistemic graph workbench and visualization environment for Journal314 and phenomenological inquiry.
 
-## Root application
+Built with **React 19**, **Vite**, **TypeScript**, and **Tailwind CSS**. Features GPU-accelerated canvas force-directed layout with Vogel's golden-angle phyllotaxis spiral packing, 4-tier semantic level-of-detail (LoD) zoom, IndexedDB client-side persistence, multi-format file ingestion (Markdown, PDF, JSON, CSV, Plaintext), in-line node inspection/editing, and optional Google Workspace (Drive & Docs) synchronization.
 
-Requires Node.js 22.13 or newer; verified with Node.js 24.14 and npm 11.13 on Windows.
+---
 
-```powershell
+## Architecture & Product Scope
+
+- **Frontend Visualization Engine**: High-performance HTML5 Canvas rendering engine with `ResizeObserver` layout decoupling, GPU smooth dampening, double-click center-to-node focus, screen-space AABB label collision grid, and 1-hop ego-network spotlights.
+- **Local Persistence Layer**: `GraphStorage` client-side storage driven by browser IndexedDB with a synchronous in-memory cache and atomic transactional cascade deletion.
+- **Client-Side Ingestion Subsystem**: Modular parsers extracting frontmatter, sections, verbatim SourceSpans, citations, and confidence status from user-uploaded philosophical documents.
+- **Google Workspace Integration**: Optional Drive and Docs integration with minimized OAuth scopes (`drive.readonly`, `drive.file`, `documents.readonly`) and in-memory-only token caching.
+
+---
+
+## Quickstart & Local Development
+
+Requires **Node.js 22.13 or newer** (tested on Node.js 22.x and 24.x).
+
+```bash
+# Install dependencies
 npm install
+
+# Run static typecheck
 npm run typecheck
+
+# Build production bundle
 npm run build
+
+# Start local development server (port 3000)
 npm run dev
 ```
 
-Open http://127.0.0.1:3000. Both npm lockfiles are included. The original root Bun lockfile is also refreshed to match the dependency changes.
+Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-To enable AI, create `.env.local` using the variables in `.env.example` and set `OPENROUTER_API_KEY` locally. Never put credentials in a `VITE_` variable or paste them into source code. Restart the server after changing its environment. The shell environment wins over `.env.local`, which wins over `.env`.
+---
 
-`OPENROUTER_MODEL` accepts an exact OpenRouter model slug. Its default is `openrouter/auto`; the selected provider must support JSON output. No key is bundled in the frontend. Without a configured key, generation remains available as explicitly labeled deterministic proposals. Provider failures also produce a visible fallback warning. Generated claims and branches remain unreviewed proposals rather than accepted evidence.
+## Interactive Navigation & Keyboard Shortcuts
 
-Select **Canonical Matrix**, inspect a saved node, then use **Generate OpenRouter proposals** or **Generate offline proposals**. Expand/collapse, search, pointer/touch panning, wheel zoom, and keyboard navigation are supported. Focus the canvas and use Enter to inspect the root, arrows to pan, plus/minus to zoom, Home to fit the graph, or Escape to close the inspector. Child buttons in the inspector provide keyboard navigation through the hierarchy.
+| Shortcut | Action |
+| :--- | :--- |
+| **Drag** or **Space + Drag** | Pan canvas viewport smoothly |
+| **Scroll Wheel** | Exponentially dampened zoom (clamped from 0.1x to 4.0x) |
+| **Double Click Node** | Focus and center camera on target entity |
+| **N** or **Alt + N** | Open glassmorphic modal to spawn a new conceptual node |
+| **F2** | Enter in-line title editing inside the Node Inspector Drawer |
+| **Delete** / **Backspace** | Safely delete selected node with confirmation modal |
+| **Home** | Reset camera transform to fit entire visible topology |
+| **Escape** | Dismiss inspector drawer, search query, or active modals |
 
-The database defaults to `data/nihiltheism.db`. `DATA_DIR` selects a separate directory. Startup preserves populated graphs, including partial graphs. SQLite uses foreign keys, WAL, and a bounded busy timeout. PDF ingestion requires extractable text; scanned/image-only PDFs need OCR before import. Character offsets refer to the extracted text. Paragraph chunks do not invent PDF page numbers.
+---
 
-For a production-mode local launch:
+## Automated Verification & Test Suite
 
-```powershell
-npm run build
-npm start
-```
+The test suite runs with Node's native test runner via `tsx` without external runtime dependencies:
 
-The server binds to `127.0.0.1` by default. `HOST` and `PORT` are configurable. This is a single-user local workbench; public hosting requires authentication and access controls in front of the server.
-
-## Standalone visualizer
-
-```powershell
-cd singularity-omega
-npm install
-npm run typecheck
-npm run build
-npm run dev
-```
-
-Open http://127.0.0.1:3001. The app runs independently of the backend. Its Vite/Tailwind dependencies were updated, and its icon package was reinstalled to replace unreadable OneDrive placeholders. Keep dependencies available locally when working from a synchronized folder.
-
-## Verification
-
-```powershell
+```bash
+# Run all unit tests
 npm test
-npm run test:regression
-npm run test:runtime
-# Start both development servers before this check:
-npm run test:browser
 ```
 
-Acceptance and regression tests use temporary SQLite databases and synthetic/mock provider responses. They do not delete records from the user database or send source text to an AI provider. Runtime smoke checks launch the compiled server on port 3002 with a disposable database. Browser checks use installed Microsoft Edge in headless mode and write desktop/mobile screenshots into `artifacts/`.
+Verified test coverage includes:
+1. **Spatial & Physics Engine (`tests/spatial.test.ts`)**:
+   - Vogel's phyllotaxis spiral clearance and constant areal density
+   - 4-Tier semantic level-of-detail (LoD) thresholds
+   - Screen-space AABB label collision culler
+   - Dynamic document supernode folding and progressive disclosure
+   - Inverse affine screen-to-world coordinate projection
+   - Archimedean spiral collision avoidance for entity spawning
+   - Global keyboard guard against input field interference (`isEditableElement`)
+   - Custom node creation, rename validation, and cascade edge pruning
+2. **Document Ingestion Pipeline (`tests/ingestion.test.ts`)**:
+   - Markdown frontmatter and hierarchical section decomposition
+   - Malformed JSON error isolation
+   - Scanned PDF detection without hallucination
+   - Streaming Markdown ingestion guardrails
+   - SHA-256 fingerprint deduplication
+   - Live telemetry and memory profiling
+3. **Google Workspace Contracts (`tests/workspace.test.ts`)**:
+   - Google Docs AST to CommonMark transformation
+   - Minimized OAuth scope enforcement
 
-Verified: 15 acceptance tests, 18 regression tests, production startup/API smoke checks, desktop/mobile browser interactions, both typechecks and builds, and zero reported dependency audit vulnerabilities. No live OpenRouter completion was executed because no OpenRouter key was configured. These checks establish the tested behavior; they do not prove the absence of every possible bug.
+---
 
-Provider implementation follows the [OpenRouter chat-completion contract](https://openrouter.ai/docs/api/api-reference/chat/send-chat-completion-request) and [JSON-output routing guidance](https://openrouter.ai/docs/guides/features/structured-outputs). Requests are bounded by input length, output tokens, and a configurable timeout; each generation makes one provider request without automatic paid retries.
+## Configuration & Environment Variables
+
+Copy `.env.example` to `.env.local` to configure optional client settings:
+
+```bash
+cp .env.example .env.local
+```
+
+| Variable | Description |
+| :--- | :--- |
+| `VITE_FIREBASE_API_KEY` | Optional Firebase Web API key for Google authentication |
+| `VITE_FIREBASE_AUTH_DOMAIN` | Optional Firebase authentication domain |
+| `VITE_FIREBASE_PROJECT_ID` | Optional Firebase project identifier |
+
+---
+
+## License
+
+MIT

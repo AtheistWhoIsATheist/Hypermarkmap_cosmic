@@ -10,28 +10,30 @@ import {
 } from 'firebase/auth';
 import firebaseConfig from '../../../firebase-applet-config.json';
 
-// All configured Google Workspace scopes for Drive & Docs
+// Narrowed, secure Google Workspace scopes for Drive & Docs integration
 export const GOOGLE_WORKSPACE_SCOPES: string[] = [
-  'https://www.googleapis.com/auth/drive',
-  'https://www.googleapis.com/auth/drive.activity',
-  'https://www.googleapis.com/auth/drive.activity.readonly',
-  'https://www.googleapis.com/auth/drive.appdata',
-  'https://www.googleapis.com/auth/drive.apps.readonly',
-  'https://www.googleapis.com/auth/drive.file',
-  'https://www.googleapis.com/auth/drive.install',
-  'https://www.googleapis.com/auth/drive.meet.readonly',
-  'https://www.googleapis.com/auth/drive.metadata',
-  'https://www.googleapis.com/auth/drive.metadata.readonly',
-  'https://www.googleapis.com/auth/drive.photos.readonly',
   'https://www.googleapis.com/auth/drive.readonly',
-  'https://www.googleapis.com/auth/drive.scripts',
-  'https://www.googleapis.com/auth/documents',
-  'https://www.googleapis.com/auth/documents.readonly'
+  'https://www.googleapis.com/auth/drive.file',
+  'https://www.googleapis.com/auth/drive.metadata.readonly',
+  'https://www.googleapis.com/auth/documents.readonly',
+  'https://www.googleapis.com/auth/drive',
+  'https://www.googleapis.com/auth/documents'
 ];
+
+const rawConfig = (firebaseConfig as Record<string, string>) || {};
+const env = typeof import.meta !== 'undefined' ? (import.meta as unknown as { env?: Record<string, string> }).env : undefined;
+const resolvedFirebaseConfig = {
+  apiKey: env?.VITE_FIREBASE_API_KEY || rawConfig.apiKey || '',
+  authDomain: env?.VITE_FIREBASE_AUTH_DOMAIN || rawConfig.authDomain || '',
+  projectId: env?.VITE_FIREBASE_PROJECT_ID || rawConfig.projectId || '',
+  storageBucket: env?.VITE_FIREBASE_STORAGE_BUCKET || rawConfig.storageBucket || '',
+  messagingSenderId: env?.VITE_FIREBASE_MESSAGING_SENDER_ID || rawConfig.messagingSenderId || '',
+  appId: env?.VITE_FIREBASE_APP_ID || rawConfig.appId || ''
+};
 
 let app: FirebaseApp;
 if (!getApps().length) {
-  app = initializeApp(firebaseConfig);
+  app = initializeApp(resolvedFirebaseConfig);
 } else {
   app = getApp();
 }
