@@ -150,3 +150,46 @@ divergent history was reconciled rather than overwritten:
 | Upstream defect fixed | `tests/export.test.ts` declared fixtures in a retired node shape (`category`, `canonicalStage`, `canonicalGroup`, `priorityScore`, `isCustom`, `created`) and passed `includeDocuments`/`includeChecksum`, none of which exist in the current `GraphNode`/`TopologyExportOptions` contracts — upstream `main` did not typecheck. The fixtures were rewritten against the current contracts and the two unknown options removed; runtime behaviour is unchanged (7/7 export assertions still pass). |
 | Test surface | Four upstream client suites (spatial, export, ingestion, workspace — 38 assertions) were added to the script matrix alongside the 15 acceptance, 18 regression, and 2 runtime smoke suites. |
 | Corpus divergence (reported, not silently merged) | The canvas visualizer renders the client-side baseline ontology shipped in `src/components/GroundedEpistemicTopologyData.ts` (50 nodes at Tier 0), while the Architect Workbench renders the server-side canonical corpus (1,808 hypermap nodes in SQLite). The two are different scopes by construction: the visualizer is a browser-local graph with its own IndexedDB persistence, the workbench is the SQLite-backed research corpus. Unifying them would change the upstream visualizer's data contract and the baseline ontology it ships, so it is recorded here as a deliberate boundary rather than an automated merge. |
+
+## Verification record (2026-10-31, converged tree)
+
+| Check | Command | Result |
+|---|---|---|
+| Static types | `bun run typecheck` | exit 0 — no diagnostics |
+| Production build | `bun run build` | `tsc && vite build` clean; `dist/` emitted (2278 modules, 490 kB app chunk + 225 kB architect chunk, code-split) |
+| Server acceptance | `bun tests/runner.ts` | 15 / 15 passed |
+| Regression | `bun test tests/regression.test.ts` | 18 / 18 passed |
+| Client: spatial | `bun tests/spatial.test.ts` | 9 / 9 passed |
+| Client: export | `bun tests/export.test.ts` | 7 / 7 passed |
+| Client: workspace | `bun tests/workspace.test.ts` | 2 / 2 passed |
+| Client: ingestion | `bun tests/ingestion.test.ts` | 20 / 20 passed |
+| Runtime smoke (Zo bridge) | `bun tests/runtime.zosite.ts` | startup, static assets, health, graph, ingestion/context, generation, errors, origin checks passed |
+| Runtime smoke (CJS bundle) | `bun run build:server && bun tests/runtime.ts` | `dist/server.cjs` (node target, CJS, 2.8 MB) boots and passes the same checks under Node |
+| Aggregate | `bun run test:all` | 71 assertions across 8 suites, 0 failures |
+
+Live HTTP handshakes against the live production process (port 56831, same-origin
+`Origin: http://127.0.0.1:56831`):
+
+| Request | Expected | Observed |
+|---|---|---|
+| `GET /api/health` | 200 `{"status":"ok","database":"connected"}` | 200, `status: ok`, `database: connected` |
+| `GET /api/hypermap/stats` | 200 with node counts | 200, `node_count: 1808` |
+| `POST /api/hypermap/densify` (same-origin) | 400 validation error, never 403 | 400 |
+| `POST /api/hypermap/densify` (no `Origin`) | allowed through to validation | 400 |
+| `POST /api/hypermap/densify` (`Origin: https://attacker.example`) | 403 | 403 |
+| `GET /` over the published HTTPS host | 200, no host/proxy rejection | 200 |
+
+Cold-restart behaviour (supervisor): the production process was killed (`SIGKILL`); the
+platform supervisor rebooted it within seconds, the port was rebound cleanly with no
+`EADDRINUSE`, and `/api/health` returned `{"status":"ok","database":"connected"}` again.
+The visualizer and the Architect Workbench were re-opened over the published HTTPS host
+after that restart and both rendered.
+
+Canonical graph integrity: the two live `POST /api/hypermap/densify` probes exercised in
+the verification pass materialised eight deterministic branch nodes in the working
+database. They were deleted through `DELETE /api/hypermap/node/:id`, and the canonical
+corpus was re-verified at **1,808 nodes** (904 + 904 across the two root trees). No
+existing node, vector, claim, or objection was altered.
+
+Published surface: https://hypermarkmap-cosmic-nihilist.zocomputer.io (public).
+`/architect` is the SQLite-backed research console; `/` is the canvas visualiser.
