@@ -1,0 +1,15 @@
+{
+  "name": "hypermarkmap-cosmic",
+  "local_port": 58306,
+  "entrypoint": "bun run dev",
+  "publish": {
+    "label": "hypermarkmap-cosmic",
+    "type": "http",
+    "entrypoint": "bun run prod",
+    "published_port": 56831,
+    "env": {
+      "NODE_ENV": "production",
+      "ZO_CLIENT_IDENTITY_TOKEN": "none"
+    }
+  }
+}

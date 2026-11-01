@@ -63,42 +63,63 @@ async function runExportTests() {
   const syntheticDocId = 'doc_test_export_subsystem';
   const customNodeA: GraphNode = {
     id: 'node_custom_kenoma_1',
+    hash: 'sha256:node_custom_kenoma_1',
     label: 'Kenoma Boundary Paradox',
-    description: 'Dynamic epistemic construct describing boundary limits.',
+    title: 'Kenoma Boundary Paradox',
+    nodeKind: 'concept',
     sourceFile: 'User Workspace',
-    category: 'Kenoma' as any,
-    canonicalStage: 'Stage I: The Primordial Rift',
-    canonicalGroup: 'Ontological Void',
-    priorityScore: 88,
-    isCustom: true,
-    created: Date.now()
+    mimeType: 'text/markdown',
+    content: 'Dynamic epistemic construct describing boundary limits.',
+    description: 'Dynamic epistemic construct describing boundary limits.',
+    systemStage: 'Stage I: Ontological Groundlessness',
+    thematicGroup: 'Nihilistic Pivot',
+    citations: [],
+    metadata: {},
+    connectedNodeIds: [],
+    createdAt: Date.now(),
+    type: 'concept',
+    isIngested: false
   };
 
   const customNodeB: GraphNode = {
     id: 'node_custom_apophasis_2',
+    hash: 'sha256:node_custom_apophasis_2',
     label: 'Radical Apophasis',
-    description: 'The speech beyond speech.',
+    title: 'Radical Apophasis',
+    nodeKind: 'concept',
     sourceFile: 'User Workspace',
-    category: 'Apophasis' as any,
-    canonicalStage: 'Stage II: Dialectical Descent',
-    canonicalGroup: 'Dialectical Tensions',
-    priorityScore: 92,
-    isCustom: true,
-    created: Date.now()
+    mimeType: 'text/markdown',
+    content: 'The speech beyond speech.',
+    description: 'The speech beyond speech.',
+    systemStage: 'Stage II: Deconstructive Dissolution',
+    thematicGroup: 'Apophatic Dynamics',
+    citations: [],
+    metadata: {},
+    connectedNodeIds: [],
+    createdAt: Date.now(),
+    type: 'concept',
+    isIngested: false
   };
 
   const dynamicIngestedNode: GraphNode = {
     id: 'node_ingested_monad_3',
+    hash: 'sha256:node_ingested_monad_3',
     label: 'Cosmic Monad Fracture',
-    description: 'Extracted from ingested treaty.',
+    title: 'Cosmic Monad Fracture',
+    nodeKind: 'concept',
     sourceFile: 'Treaty_on_Void.md',
-    documentId: syntheticDocId,
-    category: 'Monad' as any,
-    canonicalStage: 'Stage III: Radical Immanence',
-    canonicalGroup: 'Phenomenological Rupture',
-    priorityScore: 75,
-    isCustom: false,
-    created: Date.now()
+    mimeType: 'text/markdown',
+    content: 'Extracted from ingested treaty.',
+    description: 'Extracted from ingested treaty.',
+    systemStage: 'Stage III: Apophatic Liminality',
+    thematicGroup: 'Phenomenological Void',
+    citations: [],
+    metadata: {},
+    connectedNodeIds: [],
+    createdAt: Date.now(),
+    type: 'concept',
+    isIngested: true,
+    documentId: syntheticDocId
   };
 
   const edgeCustomToCustom: GraphEdge = {
@@ -138,8 +159,7 @@ async function runExportTests() {
       scope: 'unified',
       format: 'beautified',
       includeMetadata: true,
-      includeDocuments: true,
-      includeChecksum: true
+      includeSourceSpans: true
     };
 
     const payload = await GraphExportService.assemblePayload(options);
@@ -187,8 +207,7 @@ async function runExportTests() {
       scope: 'custom_only',
       format: 'beautified',
       includeMetadata: true,
-      includeDocuments: false,
-      includeChecksum: true
+      includeSourceSpans: true
     };
 
     const payload = await GraphExportService.assemblePayload(options);
@@ -240,8 +259,7 @@ async function runExportTests() {
       scope: 'ingested_only',
       format: 'minified',
       includeMetadata: true,
-      includeDocuments: true,
-      includeChecksum: true
+      includeSourceSpans: true
     };
 
     const payload = await GraphExportService.assemblePayload(options);

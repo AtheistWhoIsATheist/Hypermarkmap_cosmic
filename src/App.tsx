@@ -1,6 +1,29 @@
-import React, { Component, type ReactNode } from 'react';
+import React, { Component, Suspense, lazy, type ReactNode } from 'react';
 import { TopologyVisualizer } from './components/TopologyVisualizer';
 import { RotateCcw, AlertTriangle } from 'lucide-react';
+
+const ARCHITECT_PATH = '/architect';
+
+const ArchitectShell = lazy(() =>
+  import('./app/ArchitectShell').then((module) => ({ default: module.ArchitectShell })),
+);
+
+function isArchitectRoute(): boolean {
+  if (typeof window === 'undefined') return false;
+  const path = window.location.pathname.replace(/\/+$/, '');
+  return path === ARCHITECT_PATH || path === `${ARCHITECT_PATH}/`;
+}
+
+function ArchitectFallback() {
+  return (
+    <div className="flex h-full w-full items-center justify-center bg-zinc-950 text-zinc-400">
+      <div className="flex flex-col items-center gap-3">
+        <div className="h-8 w-8 animate-spin rounded-full border-2 border-amber-400/30 border-t-amber-400" />
+        <p className="font-mono text-xs uppercase tracking-[0.25em] text-zinc-500">Loading Architect workbench…</p>
+      </div>
+    </div>
+  );
+}
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -14,7 +37,7 @@ interface ErrorBoundaryState {
 class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
   public state: ErrorBoundaryState = {
     hasError: false,
-    error: null
+    error: null,
   };
 
   public static getDerivedStateFromError(error: Error): ErrorBoundaryState {
@@ -54,11 +77,23 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
 }
 
 export default function App() {
+  if (isArchitectRoute()) {
+    return (
+      <main className="w-screen h-screen overflow-y-auto bg-zinc-950 text-zinc-100">
+        <ErrorBoundary>
+          <Suspense fallback={<ArchitectFallback />}>
+            <ArchitectShell />
+          </Suspense>
+        </ErrorBoundary>
+      </main>
+    );
+  }
+
   return (
-    <ErrorBoundary>
-      <div className="w-screen h-screen overflow-hidden bg-[#0B0E14]">
-        <TopologyVisualizer />
-      </div>
-    </ErrorBoundary>
+    <main className="w-screen h-screen overflow-hidden bg-[#0B0E14] select-none">
+      <ErrorBoundary>
+        <TopologyVisualizer onOpenArchitect={() => { window.location.href = ARCHITECT_PATH; }} />
+      </ErrorBoundary>
+    </main>
   );
 }

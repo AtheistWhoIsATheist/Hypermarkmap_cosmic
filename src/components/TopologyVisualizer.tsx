@@ -94,10 +94,17 @@ function drawRoundRect(
 
 export interface TopologyVisualizerProps {
   initialSidebarOpen?: boolean;
+  /**
+   * Opens the Architect Workbench (research console) surface. When omitted the
+   * sidebar renders without the cross-navigation affordance, so the visualizer
+   * stays usable as a standalone embed.
+   */
+  onOpenArchitect?: () => void;
 }
 
 export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
-  initialSidebarOpen = true
+  initialSidebarOpen = true,
+  onOpenArchitect
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasContainerRef = useRef<HTMLDivElement | null>(null);
@@ -1824,6 +1831,26 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
                   </span>
                   <span className="text-[10px] font-mono text-cyan-300/80 uppercase">JSON</span>
                 </button>
+                {/* Architect Workbench Cross-Navigation */}
+                {onOpenArchitect && (
+                  <button
+                    type="button"
+                    onClick={onOpenArchitect}
+                    className="w-full py-2 px-3 rounded-lg text-xs font-semibold text-amber-200 border transition-all duration-200 hover:text-white flex items-center justify-between active:scale-[0.98] cursor-pointer group"
+                    style={{
+                      backgroundColor: 'rgba(120, 53, 15, 0.75)',
+                      borderColor: 'rgba(251, 191, 36, 0.8)',
+                      boxShadow: '0 0 12px rgba(245, 158, 11, 0.25)'
+                    }}
+                    title="Open the Architect Workbench: corpus, claims, objections, revisions, audit and research console"
+                  >
+                    <span className="flex items-center gap-2">
+                      <Compass className="w-4 h-4 text-amber-400 group-hover:scale-110 transition-transform" />
+                      <span>Architect Workbench</span>
+                    </span>
+                    <span className="text-[10px] font-mono text-amber-300/80 uppercase">Console</span>
+                  </button>
+                )}
 
                 {/* Cluster Expansion & Collapse */}
                 <div className="grid grid-cols-2 gap-2 pt-1">
