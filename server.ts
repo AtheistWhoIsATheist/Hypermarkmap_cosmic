@@ -43,7 +43,7 @@ async function startServer() {
   const HOST = process.env.HOST || '127.0.0.1';
   const production = process.env.NODE_ENV === 'production' || process.argv[1]?.endsWith('server.cjs');
   app.disable('x-powered-by');
-  app.use((req, res, next) => {
+  app.use((req: Request, res: Response, next: NextFunction) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'same-origin');
     res.setHeader('X-Frame-Options', 'DENY');
@@ -73,7 +73,7 @@ async function startServer() {
     if (ab.length !== bb.length) return false;
     return nodeCrypto.timingSafeEqual(ab, bb);
   };
-  app.use((req, res, next) => {
+  app.use((req: Request, res: Response, next: NextFunction) => {
     if (!WRITE_API_KEY) return next();
     if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
     if (!req.path.startsWith('/api/')) return next();
@@ -268,7 +268,7 @@ async function startServer() {
   // Single Passage with Context Viewer
   app.get('/api/passages/:id', (req: Request, res: Response) => {
     try {
-      const context = getPassageWithContext(req.params.id);
+      const context = getPassageWithContext(req.params.id as string);
       if (!context) return res.status(404).json({ error: 'Passage not found' });
       res.json(context);
     } catch (err: any) {
@@ -475,8 +475,8 @@ async function startServer() {
     try {
       const { decision, reviewer_notes } = req.body;
       if (!['accepted', 'rejected'].includes(decision)) return res.status(400).json({ error: 'decision must be accepted or rejected.' });
-      if (!db.prepare('SELECT id FROM revisions WHERE id = ?').get(req.params.id)) return res.status(404).json({ error: 'Revision not found' });
-      const revId = req.params.id;
+      const revId = req.params.id as string;
+      if (!db.prepare('SELECT id FROM revisions WHERE id = ?').get(revId)) return res.status(404).json({ error: 'Revision not found' });
       const now = new Date().toISOString();
 
       const updateRev = db.prepare('UPDATE revisions SET status = ? WHERE id = ?');
@@ -510,7 +510,7 @@ async function startServer() {
 
   app.get('/api/manuscript/:num', (req: Request, res: Response) => {
     try {
-      const chapter = db.prepare('SELECT * FROM manuscript_sections WHERE chapter_number = ?').get(req.params.num) as any;
+      const chapter = db.prepare('SELECT * FROM manuscript_sections WHERE chapter_number = ?').get(req.params.num as string) as any;
       if (!chapter) return res.status(404).json({ error: 'Chapter not found' });
       res.json({
         ...chapter,
@@ -547,9 +547,10 @@ async function startServer() {
 
   app.get('/api/jobs/:id', (req: Request, res: Response) => {
     try {
-      const job = db.prepare('SELECT * FROM research_jobs WHERE id = ?').get(req.params.id) as any;
+      const jobId = req.params.id as string;
+      const job = db.prepare('SELECT * FROM research_jobs WHERE id = ?').get(jobId) as any;
       if (!job) return res.status(404).json({ error: 'Job not found' });
-      const events = db.prepare('SELECT * FROM job_events WHERE job_id = ? ORDER BY timestamp ASC').all(req.params.id);
+      const events = db.prepare('SELECT * FROM job_events WHERE job_id = ? ORDER BY timestamp ASC').all(jobId);
       res.json({
         ...job,
         target_nodes: JSON.parse(job.target_nodes || '[]'),
@@ -620,9 +621,10 @@ async function startServer() {
 
   app.get('/api/research/jobs/:id', (req: Request, res: Response) => {
     try {
-      const job = db.prepare('SELECT * FROM research_jobs WHERE id = ?').get(req.params.id) as any;
+      const jobId = req.params.id as string;
+      const job = db.prepare('SELECT * FROM research_jobs WHERE id = ?').get(jobId) as any;
       if (!job) return res.status(404).json({ error: 'Job not found' });
-      const events = db.prepare('SELECT * FROM job_events WHERE job_id = ? ORDER BY timestamp ASC').all(req.params.id);
+      const events = db.prepare('SELECT * FROM job_events WHERE job_id = ? ORDER BY timestamp ASC').all(jobId);
       res.json({
         ...job,
         target_nodes: JSON.parse(job.target_nodes || '[]'),
@@ -638,7 +640,7 @@ async function startServer() {
 
   app.post('/api/research/jobs/:id/step', async (req: Request, res: Response) => {
     try {
-      const updatedJob = await runResearchLoopStep(req.params.id);
+      const updatedJob = await runResearchLoopStep(req.params.id as string);
       res.json(updatedJob);
     } catch (err: any) {
       apiError(res, err);
@@ -667,7 +669,7 @@ async function startServer() {
 
   app.get('/api/hypermap/node/:id', (req: Request, res: Response) => {
     try {
-      const node = db.prepare('SELECT * FROM hypermap_nodes WHERE id = ?').get(req.params.id);
+      const node = db.prepare('SELECT * FROM hypermap_nodes WHERE id = ?').get(req.params.id as string);
       if (!node) return res.status(404).json({ error: 'Hypermap node not found' });
       res.json(node);
     } catch (err: any) {
@@ -702,7 +704,7 @@ async function startServer() {
 
   app.put('/api/hypermap/node/:id', (req: Request, res: Response) => {
     try {
-      const updated = updateHypermapNode(req.params.id, req.body);
+      const updated = updateHypermapNode(req.params.id as string, req.body);
       res.json(updated);
     } catch (err: any) {
       apiError(res, err);
@@ -711,7 +713,7 @@ async function startServer() {
 
   app.delete('/api/hypermap/node/:id', (req: Request, res: Response) => {
     try {
-      const result = deleteHypermapNode(req.params.id);
+      const result = deleteHypermapNode(req.params.id as string);
       res.json(result);
     } catch (err: any) {
       apiError(res, err);
@@ -856,13 +858,17 @@ const handler = async (request: globalThis.Request): Promise<globalThis.Response
 };
 
 const mode = process.env.NODE_ENV === 'production' ? 'production' : 'development';
-const port = process.env.PORT
-  ? parseInt(process.env.PORT, 10)
-  : mode === 'production'
-    ? (config.publish?.published_port ?? config.local_port)
-    : config.local_port;
+const portArgIdx = process.argv.indexOf('--port');
+const portFromArg = portArgIdx !== -1 && process.argv[portArgIdx + 1] ? parseInt(process.argv[portArgIdx + 1], 10) : NaN;
+const port = Number.isInteger(portFromArg)
+  ? portFromArg
+  : (process.env.PORT ? parseInt(process.env.PORT, 10) : (config?.local_port || 3000));
 
-export default { fetch: handler, port, idleTimeout: 255 };
+const hostArgIdx = process.argv.indexOf('--host');
+const hostFromArg = hostArgIdx !== -1 && process.argv[hostArgIdx + 1] ? process.argv[hostArgIdx + 1] : undefined;
+const host = hostFromArg || process.env.HOST || '0.0.0.0';
+
+export default { fetch: handler, port, hostname: host, idleTimeout: 255 };
 
 // ---------------------------------------------------------------------------
 // NODE (NON-BUN) ENTRYPOINT
@@ -892,7 +898,7 @@ if (isNodeEntrypoint) {
             else headers.set(name, value);
           }
           const host = req.headers.host || '127.0.0.1';
-          const request = new Request(`http://${host}${req.url || '/'}`, {
+          const request = new globalThis.Request(`http://${host}${req.url || '/'}`, {
             method: req.method,
             headers,
             body: req.method === 'GET' || req.method === 'HEAD' ? undefined : body

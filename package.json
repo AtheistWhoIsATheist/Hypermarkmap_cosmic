@@ -5,10 +5,11 @@
   "type": "module",
   "scripts": {
     "clear-cache": "rm -rf node_modules/.vite",
-    "dev": "bun run clear-cache && NODE_ENV=development PORT=58306 bun run --hot server.ts",
+    "dev": "bun run clear-cache && NODE_ENV=development PORT=3000 bun run --hot server.ts",
     "build": "bun run clear-cache && tsc && vite build",
     "build:server": "bun build --target=node --format=cjs --external vite --outfile dist/server.cjs server.ts",
-    "prod": "bun run build && NODE_ENV=production PORT=56831 bun run server.ts",
+    "prod": "bun run build && NODE_ENV=production PORT=3000 bun run server.ts",
+    "start": "NODE_ENV=production PORT=3000 bun run server.ts",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "preview": "bun run vite preview",
@@ -36,6 +37,7 @@
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@types/d3": "^7.4.3",
+    "@types/express": "^5.0.6",
     "@types/node": "^22.14.0",
     "@types/react": "^18.3.5",
     "@types/react-dom": "^18.3.0",
