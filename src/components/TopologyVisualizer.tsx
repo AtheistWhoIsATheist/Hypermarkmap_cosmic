@@ -79,15 +79,20 @@ function drawRoundRect(
   h: number,
   r: number
 ): void {
+  const safeW = Number.isFinite(w) ? Math.max(0, w) : 0;
+  const safeH = Number.isFinite(h) ? Math.max(0, h) : 0;
+  const safeR = Number.isFinite(r) ? Math.max(0, r) : 0;
+  if (safeW === 0 || safeH === 0) return;
+
   if (typeof ctx.roundRect === 'function') {
-    ctx.roundRect(x, y, w, h, r);
+    ctx.roundRect(x, y, safeW, safeH, safeR);
   } else {
-    const radius = Math.min(Math.max(0, r), Math.abs(w) / 2, Math.abs(h) / 2);
+    const radius = Math.min(safeR, safeW / 2, safeH / 2);
     ctx.moveTo(x + radius, y);
-    ctx.arcTo(x + w, y, x + w, y + h, radius);
-    ctx.arcTo(x + w, y + h, x, y + h, radius);
-    ctx.arcTo(x, y + h, x, y, radius);
-    ctx.arcTo(x, y, x + w, y, radius);
+    ctx.arcTo(x + safeW, y, x + safeW, y + safeH, radius);
+    ctx.arcTo(x + safeW, y + safeH, x, y + safeH, radius);
+    ctx.arcTo(x, y + safeH, x, y, radius);
+    ctx.arcTo(x, y, x + safeW, y, radius);
     ctx.closePath();
   }
 }
@@ -193,10 +198,16 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
   });
 
   // Cached canvas viewport buffer dimensions to prevent layout thrashing
+  const initialW = typeof window !== 'undefined' ? window.innerWidth : 1200;
+  const initialH = typeof window !== 'undefined' ? window.innerHeight : 800;
   const canvasDimensionsRef = useRef<{ width: number; height: number; dpr: number }>({
-    width: typeof window !== 'undefined' ? window.innerWidth : 1200,
-    height: typeof window !== 'undefined' ? window.innerHeight : 800,
+    width: initialW,
+    height: initialH,
     dpr: 1
+  });
+  const [canvasDimensions, setCanvasDimensions] = useState<{ width: number; height: number }>({
+    width: initialW,
+    height: initialH
   });
 
   // Space key pan state
@@ -267,16 +278,28 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
     });
   }, []);
 
-  useEffect(() => {
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setDrawerOpen(false);
-        canvasRef.current?.focus();
-      }
-    };
-    if (drawerOpen) document.addEventListener('keydown', closeOnEscape);
-    return () => document.removeEventListener('keydown', closeOnEscape);
-  }, [drawerOpen]);
+  const uiLayerStateRef = useRef({
+    confirmOpen: false,
+    exportOpen: false,
+    createOpen: false,
+    workspaceOpen: false,
+    ingestionOpen: false,
+    drawerOpen: false,
+    isMobile: false,
+    sidebarOpen: true,
+    searchQuery: ''
+  });
+  uiLayerStateRef.current = {
+    confirmOpen: confirmModalConfig.isOpen,
+    exportOpen: isExportModalOpen,
+    createOpen: isCreateNodeOpen,
+    workspaceOpen: isWorkspaceOpen,
+    ingestionOpen: isIngestionOpen,
+    drawerOpen,
+    isMobile,
+    sidebarOpen,
+    searchQuery
+  };
 
   // Active Hierarchical Baseline Tree
   const [treeData, setTreeData] = useState<EpistemicTopologyNode>(() =>
@@ -810,6 +833,56 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
   // Space-to-pan & Global Keyboard Shortcuts Listener
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) {
+        return;
+      }
+
+      if (e.key === 'Escape') {
+        const layers = uiLayerStateRef.current;
+        if (layers.confirmOpen) {
+          e.preventDefault();
+          setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
+          return;
+        }
+        if (layers.exportOpen) {
+          e.preventDefault();
+          setIsExportModalOpen(false);
+          return;
+        }
+        if (layers.createOpen) {
+          e.preventDefault();
+          setIsCreateNodeOpen(false);
+          return;
+        }
+        if (layers.workspaceOpen) {
+          e.preventDefault();
+          setIsWorkspaceOpen(false);
+          return;
+        }
+        if (layers.ingestionOpen) {
+          e.preventDefault();
+          setIsIngestionOpen(false);
+          return;
+        }
+        if (layers.drawerOpen) {
+          e.preventDefault();
+          setDrawerOpen(false);
+          canvasRef.current?.focus();
+          return;
+        }
+        if (layers.isMobile && layers.sidebarOpen) {
+          e.preventDefault();
+          setSidebarOpen(false);
+          return;
+        }
+        if (!isEditableElement(e.target) && layers.searchQuery) {
+          e.preventDefault();
+          setSearchQuery('');
+          canvasRef.current?.focus();
+        }
+        return;
+      }
+
       if (isEditableElement(e.target)) {
         return;
       }
@@ -823,13 +896,6 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
             canvasRef.current.style.cursor = 'grab';
           }
         }
-      } else if (e.key === 'Escape') {
-        setDrawerOpen(false);
-        setIsCreateNodeOpen(false);
-        setIsExportModalOpen(false);
-        setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
-        setSearchQuery('');
-        canvasRef.current?.focus();
       } else if (e.key === 'Home') {
         e.preventDefault();
         handleResetView();
@@ -880,8 +946,11 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
     const canvasX = e.clientX - rect.left;
     const canvasY = e.clientY - rect.top;
     const vp = viewportRef.current;
-    const worldX = (canvasX - vp.x) / vp.scale;
-    const worldY = (canvasY - vp.y) / vp.scale;
+    const safeScale = Number.isFinite(vp.scale) && vp.scale > 0 ? vp.scale : 0.85;
+    const safeX = Number.isFinite(vp.x) ? vp.x : 0;
+    const safeY = Number.isFinite(vp.y) ? vp.y : 0;
+    const worldX = (canvasX - safeX) / safeScale;
+    const worldY = (canvasY - safeY) / safeScale;
 
     let found: PositionedVisualNode | null = null;
     const currentNodes = layoutTreeRef.current;
@@ -915,8 +984,11 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
     const canvasX = e.clientX - rect.left;
     const canvasY = e.clientY - rect.top;
     const vp = viewportRef.current;
-    const worldX = (canvasX - vp.x) / vp.scale;
-    const worldY = (canvasY - vp.y) / vp.scale;
+    const safeScale = Number.isFinite(vp.scale) && vp.scale > 0 ? vp.scale : 0.85;
+    const safeX = Number.isFinite(vp.x) ? vp.x : 0;
+    const safeY = Number.isFinite(vp.y) ? vp.y : 0;
+    const worldX = (canvasX - safeX) / safeScale;
+    const worldY = (canvasY - safeY) / safeScale;
 
     let found: PositionedVisualNode | null = null;
     const currentNodes = layoutTreeRef.current;
@@ -995,6 +1067,10 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
       const pHeight = parent.clientHeight || canvas.clientHeight || (typeof window !== 'undefined' ? window.innerHeight : 800);
       if (pWidth <= 0 || pHeight <= 0) return;
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const prevDim = canvasDimensionsRef.current;
+      if (prevDim.width !== pWidth || prevDim.height !== pHeight) {
+        setCanvasDimensions({ width: pWidth, height: pHeight });
+      }
       canvasDimensionsRef.current = { width: pWidth, height: pHeight, dpr };
       const targetW = Math.floor(pWidth * dpr);
       const targetH = Math.floor(pHeight * dpr);
@@ -1143,8 +1219,9 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
       ctx.restore();
 
       // 6. 1-Hop Ego-Network Spotlight Calculation
-      const spotlightActive = Boolean(selectedNode || activeHoverId);
-      const activeSpotlightId = selectedNode?.id || activeHoverId;
+      const activeSelectedNode = selectedNodeRef.current;
+      const spotlightActive = Boolean(activeSelectedNode || activeHoverId);
+      const activeSpotlightId = activeSelectedNode?.id || activeHoverId;
       const activeSpotlightNode = activeSpotlightId
         ? activeNodes.find((n) => n.id === activeSpotlightId)
         : null;
@@ -1199,9 +1276,19 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
       });
       ctx.globalAlpha = 1.0;
 
-      // 8. Render Bundled Inter-Cluster Meta-Edges & Relational Arcs
+      // 8. Render Bundled Inter-Cluster Meta-Edges & Collect Candidate Edge Badges
       const culler = labelCullerRef.current;
       culler.reset(width, height, 55);
+      const pendingEdgeBadges: Array<{
+        ctrlX: number;
+        ctrlY: number;
+        screenCtrlX: number;
+        screenCtrlY: number;
+        badgeText: string;
+        textW: number;
+        isHighlighted: boolean;
+        relationType: string;
+      }> = [];
 
       activeEdges.forEach((edge) => {
         if (
@@ -1212,12 +1299,13 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
         )
           return;
 
-        const isHighlighted =
+        const isHighlighted = Boolean(
           edge.isHighlighted ||
-          (activeSpotlightId &&
-            (edge.source === activeSpotlightId ||
-              edge.target === activeSpotlightId ||
-              (spotlightNeighborIds.has(edge.source) && spotlightNeighborIds.has(edge.target))));
+            (activeSpotlightId &&
+              (edge.source === activeSpotlightId ||
+                edge.target === activeSpotlightId ||
+                (spotlightNeighborIds.has(edge.source) && spotlightNeighborIds.has(edge.target))))
+        );
 
         const edgeAlpha = spotlightActive ? (isHighlighted ? 1.0 : 0.12) : 0.45;
         ctx.globalAlpha = edgeAlpha;
@@ -1256,7 +1344,7 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
         ctx.stroke();
         ctx.setLineDash([]);
 
-        // Meta-Edge Badge: Visibility based on Semantic Zoom Tier
+        // Collect edge badge for post-node-label collision culling so node titles keep label budget priority
         const shouldShowEdgeLabel =
           lodTier >= 3
             ? true
@@ -1271,47 +1359,16 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
           const screenCtrlY = safeY + ctrlY * safeScale;
 
           if (culler.isInFrustum(screenCtrlX, screenCtrlY)) {
-            const fontPx = 10;
-            const textW = badgeText.length * 6.2 + 10;
-            const edgeRect: ScreenRect = {
-              x1: screenCtrlX - textW / 2 - 4,
-              y1: screenCtrlY - fontPx,
-              x2: screenCtrlX + textW / 2 + 4,
-              y2: screenCtrlY + fontPx,
-              priority: isHighlighted ? 9000 : 400
-            };
-
-            const canDrawEdgeLabel = isHighlighted || culler.testAndInsert(edgeRect);
-
-            if (canDrawEdgeLabel) {
-              ctx.save();
-              ctx.font = '10px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
-              const padX = 6;
-              const padY = 3;
-
-              ctx.fillStyle = isHighlighted ? 'rgba(15, 23, 42, 0.95)' : 'rgba(2, 6, 23, 0.85)';
-              ctx.strokeStyle = isHighlighted
-                ? 'rgba(56, 189, 248, 0.85)'
-                : edge.relationType === 'contradicts'
-                ? 'rgba(244, 63, 94, 0.6)'
-                : 'rgba(148, 163, 184, 0.35)';
-              ctx.lineWidth = 1 / safeScale;
-
-              ctx.beginPath();
-              drawRoundRect(ctx, ctrlX - textW / 2 - padX, ctrlY - 7 - padY, textW + padX * 2, 14 + padY * 2, 4);
-              ctx.fill();
-              ctx.stroke();
-
-              ctx.fillStyle = isHighlighted
-                ? '#38bdf8'
-                : edge.relationType === 'contradicts'
-                ? '#fda4af'
-                : '#cbd5e1';
-              ctx.textAlign = 'center';
-              ctx.textBaseline = 'middle';
-              ctx.fillText(badgeText, ctrlX, ctrlY);
-              ctx.restore();
-            }
+            pendingEdgeBadges.push({
+              ctrlX,
+              ctrlY,
+              screenCtrlX,
+              screenCtrlY,
+              badgeText,
+              textW: badgeText.length * 6.2 + 10,
+              isHighlighted,
+              relationType: edge.relationType
+            });
           }
         }
       });
@@ -1417,11 +1474,61 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
         c.node.canRenderLabel = accepted;
       });
 
+      // Render non-colliding edge badges after priority node labels claim screen space
+      pendingEdgeBadges.sort((a, b) => Number(b.isHighlighted) - Number(a.isHighlighted));
+      pendingEdgeBadges.forEach((badge) => {
+        const padX = 6;
+        const padY = 3;
+        const halfScreenW = ((badge.textW + padX * 2) * safeScale) / 2;
+        const halfScreenH = ((14 + padY * 2) * safeScale) / 2;
+        const edgeRect: ScreenRect = {
+          x1: badge.screenCtrlX - halfScreenW,
+          y1: badge.screenCtrlY - halfScreenH,
+          x2: badge.screenCtrlX + halfScreenW,
+          y2: badge.screenCtrlY + halfScreenH,
+          priority: badge.isHighlighted ? 9000 : 400
+        };
+        if (!culler.testAndInsert(edgeRect)) return;
+
+        ctx.save();
+        ctx.font = '10px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+
+        ctx.fillStyle = badge.isHighlighted ? 'rgba(15, 23, 42, 0.95)' : 'rgba(2, 6, 23, 0.85)';
+        ctx.strokeStyle = badge.isHighlighted
+          ? 'rgba(56, 189, 248, 0.85)'
+          : badge.relationType === 'contradicts'
+          ? 'rgba(244, 63, 94, 0.6)'
+          : 'rgba(148, 163, 184, 0.35)';
+        ctx.lineWidth = 1 / safeScale;
+
+        ctx.beginPath();
+        drawRoundRect(
+          ctx,
+          badge.ctrlX - badge.textW / 2 - padX,
+          badge.ctrlY - 7 - padY,
+          badge.textW + padX * 2,
+          14 + padY * 2,
+          4
+        );
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = badge.isHighlighted
+          ? '#38bdf8'
+          : badge.relationType === 'contradicts'
+          ? '#fda4af'
+          : '#cbd5e1';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(badge.badgeText, badge.ctrlX, badge.ctrlY);
+        ctx.restore();
+      });
+
       // 10. Render Luminous Nodes & Optical Glyphs
       activeNodes.forEach((node) => {
         if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
         const radius = Math.max(2, node.radius || 12);
-        const isSelected = selectedNode && selectedNode.id === node.id;
+        const isSelected = Boolean(activeSelectedNode && activeSelectedNode.id === node.id);
         const isHovered = activeHoverId === node.id;
         const isMatch = node.isMatch;
 
@@ -1555,7 +1662,7 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
       window.removeEventListener('resize', handleResize);
       if (animFrameIdRef.current !== null) cancelAnimationFrame(animFrameIdRef.current);
     };
-  }, [viewGraph, selectedNode]);
+  }, []);
 
 
   return (
@@ -1983,7 +2090,11 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
                 setDrawerOpen(true);
               }
             } else if (event.key === 'Escape') {
-              setDrawerOpen(false);
+              if (drawerOpen && !confirmModalConfig.isOpen && !isCreateNodeOpen && !isExportModalOpen && !isWorkspaceOpen && !isIngestionOpen) {
+                event.preventDefault();
+                event.stopPropagation();
+                setDrawerOpen(false);
+              }
             } else if (event.key === 'Home') {
               event.preventDefault();
               handleResetView();
@@ -2013,8 +2124,8 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
         <CosmicFloatingHUD
           nodes={layoutTree}
           viewport={viewport}
-          canvasWidth={canvasDimensionsRef.current.width}
-          canvasHeight={canvasDimensionsRef.current.height}
+          canvasWidth={canvasDimensions.width}
+          canvasHeight={canvasDimensions.height}
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
           searchMatchCount={searchMatchCount}

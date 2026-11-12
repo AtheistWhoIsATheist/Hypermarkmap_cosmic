@@ -1216,6 +1216,9 @@ function addHypermapNodeInternal(input: HypermapNodeInput): HypermapNode {
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
+  const resolvedWarrant = input.warrant_category || (input.node_type === 'objection' || input.node_type === 'paradox' ? 'W4' : 'W2');
+  const resolvedStatus = resolvedWarrant === 'W5' ? 'disputed' : (input.epistemic_status || 'supported');
+
   insertNode.run(
     id,
     projectId,
@@ -1223,9 +1226,9 @@ function addHypermapNodeInternal(input: HypermapNodeInput): HypermapNode {
     rootTreeId,
     input.title,
     input.node_type,
-    input.warrant_category || (input.node_type === 'objection' || input.node_type === 'paradox' ? 'W4' : 'W2'),
+    resolvedWarrant,
     input.payload_text,
-    input.epistemic_status || 'supported',
+    resolvedStatus,
     input.paradox_relation || (input.node_type === 'paradox' ? 'LP_antinomy_priest' : null),
     input.fidelity_label || 'PROPOSED',
     claimId,
@@ -1300,37 +1303,47 @@ function updateHypermapNodeInternal(id: string, updates: Partial<HypermapNodeInp
 }
 
 export function deleteHypermapNode(id: string): { success: boolean; deletedCount: number } {
-  const db = getDb();
-  
-  // Recursively collect all descendant IDs
-  const toDelete: string[] = [id];
-  let cursor = 0;
-  while (cursor < toDelete.length) {
-    const parentId = toDelete[cursor];
-    const children = db.prepare('SELECT id FROM hypermap_nodes WHERE parent_id = ?').all(parentId) as any[];
-    for (const c of children) {
-      toDelete.push(c.id);
+  return atomic(() => {
+    const db = getDb();
+    const existing = db.prepare('SELECT id FROM hypermap_nodes WHERE id = ?').get(id) as any;
+    if (!existing) {
+      throw new InputError(`Hypermap node ${id} not found.`, 404);
     }
-    cursor++;
-  }
 
-  const deleteStmt = db.prepare('DELETE FROM hypermap_nodes WHERE id = ?');
-  const getClaimStmt = db.prepare('SELECT claim_id FROM hypermap_nodes WHERE id = ?');
+    // Recursively collect all descendant IDs with cycle protection
+    const toDelete: string[] = [id];
+    const visited = new Set<string>([id]);
+    let cursor = 0;
+    while (cursor < toDelete.length) {
+      const parentId = toDelete[cursor];
+      const children = db.prepare('SELECT id FROM hypermap_nodes WHERE parent_id = ?').all(parentId) as any[];
+      for (const c of children) {
+        if (c?.id && !visited.has(c.id)) {
+          visited.add(c.id);
+          toDelete.push(c.id);
+        }
+      }
+      cursor++;
+    }
 
-  for (const nId of toDelete) {
-    try {
+    const deleteStmt = db.prepare('DELETE FROM hypermap_nodes WHERE id = ?');
+    const getClaimStmt = db.prepare('SELECT claim_id FROM hypermap_nodes WHERE id = ?');
+    const deleteRelationStmt = db.prepare('DELETE FROM relations WHERE source_entity_id = ? OR target_entity_id = ?');
+
+    for (const nId of toDelete) {
       const nodeRow = getClaimStmt.get(nId) as any;
       if (nodeRow?.claim_id) {
         db.prepare('DELETE FROM claims WHERE id = ?').run(nodeRow.claim_id);
       }
-    } catch {}
-    try { db.prepare('DELETE FROM claims WHERE id = ?').run(`clm_${nId}`); } catch {}
-    try { db.prepare('DELETE FROM objections WHERE id = ?').run(`obj_${nId}`); } catch {}
-    try { db.prepare('DELETE FROM contradictions WHERE id = ?').run(`cntr_${nId}`); } catch {}
-    deleteStmt.run(nId);
-  }
+      db.prepare('DELETE FROM claims WHERE id = ?').run(`clm_${nId}`);
+      db.prepare('DELETE FROM objections WHERE id = ?').run(`obj_${nId}`);
+      db.prepare('DELETE FROM contradictions WHERE id = ?').run(`cntr_${nId}`);
+      deleteRelationStmt.run(nId, nId);
+      deleteStmt.run(nId);
+    }
 
-  return { success: true, deletedCount: toDelete.length };
+    return { success: true, deletedCount: toDelete.length };
+  });
 }
 
 export function densifyHypermapNode(nodeId: string, customStrategy?: string): Promise<HypermapDensifyResult> {

@@ -601,14 +601,23 @@ const DEFAULT_STAGE_TIMEOUT_MS = 15000; // 15 seconds safety timeout per stage t
 /**
  * Runs a promise with an explicit stage safety timeout
  */
-function withTimeout<T>(promise: Promise<T>, ms: number, stageName: string): Promise<T> {
-  let timer: any = null;
+function withTimeout<T>(
+  promiseOrFactory: Promise<T> | ((signal: AbortSignal) => Promise<T>),
+  ms: number,
+  stageName: string
+): Promise<T> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const targetPromise =
+    typeof promiseOrFactory === 'function' ? promiseOrFactory(controller.signal) : promiseOrFactory;
+
   const timeoutPromise = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
+      controller.abort();
       reject(new Error(`Timeout: Ingestion exceeded ${ms / 1000}s limit at stage: '${stageName}'.`));
     }, ms);
   });
-  return Promise.race([promise, timeoutPromise]).finally(() => {
+  return Promise.race([targetPromise, timeoutPromise]).finally(() => {
     if (timer) clearTimeout(timer);
   });
 }
@@ -865,12 +874,14 @@ export class IngestionService {
         'Parsing document structure...',
         { ...fileContext, hash, detectedMime: batchItem.mimeType, parser: parser.constructor.name },
         () => withTimeout(
-          parser.parse(file, hash, {
-            ...options,
-            onProgress: (label) => {
-              updateStage(label);
-            }
-          }),
+          (signal) =>
+            parser.parse(file, hash, {
+              ...options,
+              signal,
+              onProgress: (label) => {
+                updateStage(label);
+              }
+            }),
           stageTimeout * 2, // Allow extra time for huge documents up to 500MB
           'Parsing document structure'
         )

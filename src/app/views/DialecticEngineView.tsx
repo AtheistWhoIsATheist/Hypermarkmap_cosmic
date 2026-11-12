@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Scale,
   Shield,
@@ -14,6 +14,7 @@ import {
   HelpCircle
 } from 'lucide-react';
 import { api } from '../api';
+import { ConfirmModal } from '../../components/ConfirmModal';
 import type { Claim, AdversarialObjection, Contradiction, WarrantCategory } from '../types';
 
 export const DialecticEngineView: React.FC = () => {
@@ -31,41 +32,65 @@ export const DialecticEngineView: React.FC = () => {
   const [newClaimText, setNewClaimText] = useState<string>('');
   const [newClaimWarrant, setNewClaimWarrant] = useState<WarrantCategory>('W1');
   const [newClaimEpistemic, setNewClaimEpistemic] = useState<string>('SUPPORTED');
+  const [claimError, setClaimError] = useState<string | null>(null);
+  const [showW5Confirm, setShowW5Confirm] = useState<boolean>(false);
+
+  const mountedRef = useRef<boolean>(true);
+  const loadAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    loadData();
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      loadAbortRef.current?.abort();
+    };
   }, []);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
+    loadAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadAbortRef.current = controller;
+
     try {
       setLoading(true);
       const [c, o, ct] = await Promise.all([
-        api.getClaims(),
-        api.getObjections(),
-        api.getContradictions()
+        api.getClaims(controller.signal),
+        api.getObjections(controller.signal),
+        api.getContradictions(controller.signal)
       ]);
+      if (!mountedRef.current || loadAbortRef.current !== controller) return;
       setClaims(c);
       setObjections(o);
       setContradictions(ct);
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.name === 'AbortError' || controller.signal.aborted) return;
       console.error('Failed to load dialectic data:', err);
     } finally {
-      setLoading(false);
+      if (mountedRef.current && loadAbortRef.current === controller) {
+        setLoading(false);
+      }
     }
-  };
+  }, []);
 
-  const handleCreateClaim = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newClaimTitle || !newClaimText) return;
+  useEffect(() => {
+    void loadData();
+  }, [loadData]);
 
-    if (newClaimWarrant === 'W5') {
-      const confirmW5 = window.confirm(
-        'WARNING: Warrant W5 represents Metaphysical Closure, which is constitutionally prohibited as an accepted fact. Do you want to record this claim as a DISPUTED proposition under adversarial review?'
-      );
-      if (!confirmW5) return;
-    }
+  useEffect(() => {
+    if (!showAddClaim || showW5Confirm) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.key !== 'Escape') return;
+      e.preventDefault();
+      setClaimError(null);
+      setShowAddClaim(false);
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [showAddClaim, showW5Confirm]);
 
+  const submitNewClaim = async () => {
     try {
+      setClaimError(null);
       const created = await api.createClaim({
         project_id: 'proj_journal314_canonical',
         text: newClaimText || newClaimTitle,
@@ -74,13 +99,27 @@ export const DialecticEngineView: React.FC = () => {
         warrant_category: newClaimWarrant,
         support_status: newClaimWarrant === 'W5' ? 'disputed' : 'unreviewed'
       });
-      setClaims([created, ...claims]);
+      if (!mountedRef.current) return;
+      setClaims((prev) => [created, ...prev]);
       setShowAddClaim(false);
       setNewClaimTitle('');
       setNewClaimText('');
     } catch (err: any) {
-      alert(`Failed to create claim: ${err.message}`);
+      if (!mountedRef.current) return;
+      setClaimError(`Failed to create claim: ${err?.message || 'Unknown error'}`);
     }
+  };
+
+  const handleCreateClaim = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newClaimTitle || !newClaimText) return;
+
+    if (newClaimWarrant === 'W5') {
+      setShowW5Confirm(true);
+      return;
+    }
+
+    await submitNewClaim();
   };
 
   const filteredClaims = claims.filter((c) => {
@@ -511,10 +550,20 @@ export const DialecticEngineView: React.FC = () => {
               * Submitted claims are automatically audited against the 12 Mandatory Critical Revisions.
             </div>
 
+            {claimError && (
+              <div role="alert" className="p-2.5 rounded-lg bg-rose-950/60 border border-rose-500/40 text-xs font-mono text-rose-200 flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                <span>{claimError}</span>
+              </div>
+            )}
+
             <div className="flex justify-end space-x-3 pt-2">
               <button
                 type="button"
-                onClick={() => setShowAddClaim(false)}
+                onClick={() => {
+                  setClaimError(null);
+                  setShowAddClaim(false);
+                }}
                 className="px-3 py-1.5 bg-zinc-800 text-zinc-300 text-xs rounded hover:bg-zinc-700"
               >
                 Cancel
@@ -529,6 +578,20 @@ export const DialecticEngineView: React.FC = () => {
           </form>
         </div>
       )}
+
+      {/* W5 Constitutional Prohibition Confirm Modal */}
+      <ConfirmModal
+        isOpen={showW5Confirm}
+        title="Confirm W5 Metaphysical Closure Target?"
+        message="Warrant W5 represents Metaphysical Closure, which is constitutionally prohibited as an accepted fact. Record this claim as a DISPUTED proposition under adversarial review?"
+        confirmLabel="Record as Disputed"
+        confirmVariant="warning"
+        onConfirm={() => {
+          setShowW5Confirm(false);
+          void submitNewClaim();
+        }}
+        onCancel={() => setShowW5Confirm(false)}
+      />
     </div>
   );
 };

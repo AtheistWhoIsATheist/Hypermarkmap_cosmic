@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Search,
   X,
@@ -71,6 +71,13 @@ export const CosmicFloatingHUD: React.FC<CosmicFloatingHUDProps> = ({
   const [showLayoutSliders, setShowLayoutSliders] = useState(false);
   const [currentMatchIndex, setCurrentMatchIndex] = useState(0);
 
+  useEffect(() => {
+    setCurrentMatchIndex((prev) => {
+      if (matchingNodes.length === 0) return 0;
+      return prev >= matchingNodes.length ? 0 : prev;
+    });
+  }, [matchingNodes.length]);
+
   // Cycle through search matches
   const handleNextMatch = () => {
     if (matchingNodes.length === 0) return;
@@ -105,7 +112,7 @@ export const CosmicFloatingHUD: React.FC<CosmicFloatingHUDProps> = ({
             <span className="font-serif font-bold text-xs tracking-wide text-slate-100 flex items-center gap-1.5">
               Epistemic HUD
               <span className="text-[10px] font-mono text-cyan-300/80 px-1 py-0.2 rounded bg-cyan-950/80 border border-cyan-500/30">
-                {Math.round(viewport.scale * 100)}%
+                {Math.round((Number.isFinite(viewport.scale) && viewport.scale > 0 ? viewport.scale : 0.85) * 100)}%
               </span>
             </span>
           </div>

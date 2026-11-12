@@ -180,15 +180,17 @@ export const CosmicMinimap: React.FC<CosmicMinimapProps> = ({
       const canvas = minimapCanvasRef.current;
       if (!canvas) return;
       const rect = canvas.getBoundingClientRect();
-      const clickX = e.clientX - rect.left;
-      const clickY = e.clientY - rect.top;
+      if (rect.width <= 0 || rect.height <= 0) return;
 
       const w = canvas.width;
       const h = canvas.height;
+      const clickX = (e.clientX - rect.left) * (w / rect.width);
+      const clickY = (e.clientY - rect.top) * (h / rect.height);
 
       const scaleX = (w - 16) / bounds.width;
       const scaleY = (h - 16) / bounds.height;
       const mapScale = Math.min(scaleX, scaleY);
+      if (!Number.isFinite(mapScale) || mapScale <= 0) return;
 
       const offsetX = 8 + (w - 16 - bounds.width * mapScale) / 2;
       const offsetY = 8 + (h - 16 - bounds.height * mapScale) / 2;
@@ -196,6 +198,7 @@ export const CosmicMinimap: React.FC<CosmicMinimapProps> = ({
       // Map click coordinate back to world coordinates
       const worldX = bounds.minX + (clickX - offsetX) / mapScale;
       const worldY = bounds.minY + (clickY - offsetY) / mapScale;
+      if (!Number.isFinite(worldX) || !Number.isFinite(worldY)) return;
 
       onPanToWorld(worldX, worldY);
     },

@@ -36,6 +36,18 @@ export interface GoogleDocDocument {
   };
 }
 
+const DOCS_FETCH_TIMEOUT_MS = 30000;
+
+async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DOCS_FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: init.signal || controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Fetch a Google Doc by its ID.
  */
@@ -45,7 +57,7 @@ export async function getGoogleDoc(documentId: string): Promise<GoogleDocDocumen
     throw new Error('Not authenticated. Please sign in with Google to access Google Docs.');
   }
 
-  const res = await fetch(`https://docs.googleapis.com/v1/documents/${documentId}`, {
+  const res = await fetchWithTimeout(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(documentId)}`, {
     headers: {
       Authorization: `Bearer ${token}`
     }
@@ -128,7 +140,7 @@ export async function createGoogleDoc(title: string): Promise<GoogleDocDocument>
     throw new Error('Not authenticated. Please sign in with Google to create Docs.');
   }
 
-  const res = await fetch('https://docs.googleapis.com/v1/documents', {
+  const res = await fetchWithTimeout('https://docs.googleapis.com/v1/documents', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
@@ -159,7 +171,7 @@ export async function batchUpdateGoogleDoc(
     throw new Error('Not authenticated. Please sign in with Google to update Docs.');
   }
 
-  const res = await fetch(`https://docs.googleapis.com/v1/documents/${documentId}:batchUpdate`, {
+  const res = await fetchWithTimeout(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(documentId)}:batchUpdate`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,

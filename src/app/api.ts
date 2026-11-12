@@ -72,20 +72,53 @@ async function handleResponse<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-function request(url: string, options: RequestInit = {}): Promise<Response> {
-  return fetch(url, { ...options, signal: options.signal || AbortSignal.timeout(65000) });
+async function request(url: string, options: RequestInit = {}): Promise<Response> {
+  const timeoutSignal = AbortSignal.timeout(65000);
+  let combinedSignal: AbortSignal = timeoutSignal;
+  let onUserAbort: (() => void) | null = null;
+  let controller: AbortController | null = null;
+
+  if (options.signal) {
+    if (typeof AbortSignal.any === 'function') {
+      combinedSignal = AbortSignal.any([options.signal, timeoutSignal]);
+    } else {
+      controller = new AbortController();
+      const abortFrom = (src: AbortSignal) => {
+        if (!controller?.signal.aborted) {
+          controller?.abort(src.reason);
+        }
+      };
+      if (options.signal.aborted) {
+        abortFrom(options.signal);
+      } else {
+        onUserAbort = () => abortFrom(options.signal!);
+        options.signal.addEventListener('abort', onUserAbort, { once: true });
+        timeoutSignal.addEventListener('abort', () => abortFrom(timeoutSignal), { once: true });
+      }
+      combinedSignal = controller.signal;
+    }
+  }
+
+  try {
+    return await fetch(url, { ...options, signal: combinedSignal });
+  } finally {
+    if (options.signal && onUserAbort) {
+      options.signal.removeEventListener('abort', onUserAbort);
+    }
+  }
 }
+
 export const api = {
-  getHealth: async (): Promise<{ ai: { configured: boolean; model: string; provider: string } }> => {
-    return handleResponse(await request('/api/health'));
+  getHealth: async (signal?: AbortSignal): Promise<{ ai: { configured: boolean; model: string; provider: string } }> => {
+    return handleResponse(await request('/api/health', { signal }));
   },
-  getStats: async (): Promise<StatsResponse> => {
-    const res = await request('/api/stats');
+  getStats: async (signal?: AbortSignal): Promise<StatsResponse> => {
+    const res = await request('/api/stats', { signal });
     return handleResponse<StatsResponse>(res);
   },
 
-  getSources: async (): Promise<Source[]> => {
-    const res = await request('/api/sources');
+  getSources: async (signal?: AbortSignal): Promise<Source[]> => {
+    const res = await request('/api/sources', { signal });
     return handleResponse<Source[]>(res);
   },
 
@@ -99,24 +132,24 @@ export const api = {
     return result.source;
   },
 
-  searchPassages: async (query: string, limit: number = 25): Promise<Passage[]> => {
-    const res = await request(`/api/passages/search?q=${encodeURIComponent(query)}&limit=${limit}`);
+  searchPassages: async (query: string, limit: number = 25, signal?: AbortSignal): Promise<Passage[]> => {
+    const res = await request(`/api/passages/search?q=${encodeURIComponent(query)}&limit=${limit}`, { signal });
     return handleResponse<Passage[]>(res);
   },
 
-  getPassageContext: async (id: string): Promise<PassageContextResponse> => {
-    const res = await request(`/api/passages/${encodeURIComponent(id)}`);
+  getPassageContext: async (id: string, signal?: AbortSignal): Promise<PassageContextResponse> => {
+    const res = await request(`/api/passages/${encodeURIComponent(id)}`, { signal });
     const result = await handleResponse<{ target: Passage; before: Passage[]; after: Passage[]; source: Source | null }>(res);
     return { passage: result.target, prevPassage: result.before.at(-1) || null, nextPassage: result.after[0] || null, source: result.source };
   },
 
-  getCorrections: async (): Promise<MandatoryCorrection[]> => {
-    const res = await request('/api/corrections');
+  getCorrections: async (signal?: AbortSignal): Promise<MandatoryCorrection[]> => {
+    const res = await request('/api/corrections', { signal });
     return handleResponse<MandatoryCorrection[]>(res);
   },
 
-  getClaims: async (): Promise<Claim[]> => {
-    const res = await request('/api/claims');
+  getClaims: async (signal?: AbortSignal): Promise<Claim[]> => {
+    const res = await request('/api/claims', { signal });
     return handleResponse<Claim[]>(res);
   },
 
@@ -129,8 +162,8 @@ export const api = {
     return handleResponse<Claim>(res);
   },
 
-  getObjections: async (): Promise<AdversarialObjection[]> => {
-    const res = await request('/api/objections');
+  getObjections: async (signal?: AbortSignal): Promise<AdversarialObjection[]> => {
+    const res = await request('/api/objections', { signal });
     return handleResponse<AdversarialObjection[]>(res);
   },
 
@@ -143,23 +176,23 @@ export const api = {
     return handleResponse<AdversarialObjection>(res);
   },
 
-  getContradictions: async (): Promise<Contradiction[]> => {
-    const res = await request('/api/contradictions');
+  getContradictions: async (signal?: AbortSignal): Promise<Contradiction[]> => {
+    const res = await request('/api/contradictions', { signal });
     return handleResponse<Contradiction[]>(res);
   },
 
-  getManuscriptChapters: async (): Promise<ManuscriptSection[]> => {
-    const res = await request('/api/manuscript');
+  getManuscriptChapters: async (signal?: AbortSignal): Promise<ManuscriptSection[]> => {
+    const res = await request('/api/manuscript', { signal });
     return handleResponse<ManuscriptSection[]>(res);
   },
 
-  getManuscriptChapter: async (num: number): Promise<ManuscriptSection> => {
-    const res = await request(`/api/manuscript/${num}`);
+  getManuscriptChapter: async (num: number, signal?: AbortSignal): Promise<ManuscriptSection> => {
+    const res = await request(`/api/manuscript/${num}`, { signal });
     return handleResponse<ManuscriptSection>(res);
   },
 
-  getJobs: async (): Promise<ResearchJob[]> => {
-    const res = await request('/api/jobs');
+  getJobs: async (signal?: AbortSignal): Promise<ResearchJob[]> => {
+    const res = await request('/api/jobs', { signal });
     return handleResponse<ResearchJob[]>(res);
   },
 
@@ -177,19 +210,19 @@ export const api = {
     return handleResponse<AuditReport>(res);
   },
 
-  getHypermapTree: async (root?: string): Promise<HypermapTreeNode> => {
+  getHypermapTree: async (root?: string, signal?: AbortSignal): Promise<HypermapTreeNode> => {
     const query = root ? `?root=${encodeURIComponent(root)}` : '';
-    const res = await request(`/api/hypermap/tree${query}`);
+    const res = await request(`/api/hypermap/tree${query}`, { signal });
     return handleResponse<HypermapTreeNode>(res);
   },
 
-  getHypermapStats: async (): Promise<HypermapStats> => {
-    const res = await request('/api/hypermap/stats');
+  getHypermapStats: async (signal?: AbortSignal): Promise<HypermapStats> => {
+    const res = await request('/api/hypermap/stats', { signal });
     return handleResponse<HypermapStats>(res);
   },
 
-  getHypermapNode: async (id: string): Promise<HypermapNode> => {
-    const res = await request(`/api/hypermap/node/${encodeURIComponent(id)}`);
+  getHypermapNode: async (id: string, signal?: AbortSignal): Promise<HypermapNode> => {
+    const res = await request(`/api/hypermap/node/${encodeURIComponent(id)}`, { signal });
     return handleResponse<HypermapNode>(res);
   },
 

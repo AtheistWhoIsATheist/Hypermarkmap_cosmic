@@ -212,17 +212,36 @@ class GraphStorageEngine {
 
         tx.objectStore('documents').getAll().onsuccess = (e) => {
           const docs = (e.target as IDBRequest<SourceDocument[]>).result || [];
-          docs.forEach(d => this.cachedDocuments.set(d.id, d));
+          docs.forEach((d) => {
+            if (d && typeof d.id === 'string' && d.id) {
+              this.cachedDocuments.set(d.id, d);
+            }
+          });
         };
 
         tx.objectStore('nodes').getAll().onsuccess = (e) => {
           const nodes = (e.target as IDBRequest<GraphNode[]>).result || [];
-          nodes.forEach(n => this.cachedNodes.set(n.id, n));
+          nodes.forEach((n) => {
+            if (n && typeof n.id === 'string' && n.id) {
+              this.cachedNodes.set(n.id, n);
+            }
+          });
         };
 
         tx.objectStore('edges').getAll().onsuccess = (e) => {
           const edges = (e.target as IDBRequest<GraphEdge[]>).result || [];
           edges.forEach((ed) => {
+            if (
+              !ed ||
+              typeof ed.id !== 'string' ||
+              !ed.id ||
+              typeof ed.source !== 'string' ||
+              !ed.source ||
+              typeof ed.target !== 'string' ||
+              !ed.target
+            ) {
+              return;
+            }
             const targetId = BASELINE_ID_ALIASES[ed.target] || ed.target;
             const sourceId = BASELINE_ID_ALIASES[ed.source] || ed.source;
             const normalizedEd =
@@ -235,12 +254,20 @@ class GraphStorageEngine {
 
         tx.objectStore('source_spans').getAll().onsuccess = (e) => {
           const spans = (e.target as IDBRequest<SourceSpan[]>).result || [];
-          spans.forEach(s => this.cachedSpans.set(s.spanId, s));
+          spans.forEach((s) => {
+            if (s && typeof s.spanId === 'string' && s.spanId) {
+              this.cachedSpans.set(s.spanId, s);
+            }
+          });
         };
 
         tx.objectStore('file_hashes').getAll().onsuccess = (e) => {
           const hashes = (e.target as IDBRequest<{ hash: string }[]>).result || [];
-          hashes.forEach(h => this.cachedHashes.add(h.hash));
+          hashes.forEach((h) => {
+            if (h && typeof h.hash === 'string' && h.hash) {
+              this.cachedHashes.add(h.hash);
+            }
+          });
         };
 
         tx.oncomplete = () => {
@@ -352,6 +379,45 @@ class GraphStorageEngine {
     return validEdges;
   }
 
+  private runTransaction(
+    db: IDBDatabase,
+    storeNames: string[],
+    mode: IDBTransactionMode,
+    executor: (tx: IDBTransaction) => void,
+    timeoutMs = 4000
+  ): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          reject(new Error(`IndexedDB transaction timed out after ${timeoutMs}ms`));
+        }
+      }, timeoutMs);
+
+      const finish = (err?: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (err) {
+          reject(err instanceof Error ? err : new Error(String(err)));
+        } else {
+          resolve();
+        }
+      };
+
+      try {
+        const tx = db.transaction(storeNames, mode);
+        tx.oncomplete = () => finish();
+        tx.onerror = () => finish(tx.error || new Error('IndexedDB transaction failed'));
+        tx.onabort = () => finish(tx.error || new Error('IndexedDB transaction aborted'));
+        executor(tx);
+      } catch (err) {
+        finish(err);
+      }
+    });
+  }
+
   /**
    * Atomic commit of extracted nodes, edges, spans, document metadata, and file hash.
    * Chunks node and edge insertions into 500-item transactions to prevent IPC starvation.
@@ -377,103 +443,59 @@ class GraphStorageEngine {
 
     const db = await this.getDb();
 
-    // 2. Commit to IndexedDB in bounded batches if available with safety timeout
+    // 2. Commit to IndexedDB in bounded batches with per-transaction safety timeouts
     if (db) {
       try {
-        await Promise.race([
-          (async () => {
-            // 2a. Store Document Record
-            if (sanitizedDoc) {
-              await new Promise<void>((resolve, reject) => {
-                try {
-                  const tx = db.transaction(['documents'], 'readwrite');
-                  tx.onerror = () => reject(new Error(`IndexedDB document write failed: ${tx.error?.message}`));
-                  tx.onabort = () => reject(new Error(`IndexedDB document write aborted: ${tx.error?.message}`));
-                  const req = tx.objectStore('documents').put(sanitizedDoc);
-                  req.onerror = () => reject(req.error);
-                  tx.oncomplete = () => resolve();
-                } catch (err) {
-                  reject(err);
+        // 2a. Store Document Record
+        if (sanitizedDoc) {
+          await this.runTransaction(db, ['documents'], 'readwrite', (tx) => {
+            tx.objectStore('documents').put(sanitizedDoc);
+          });
+        }
+
+        // 2b. Store Nodes & Source Spans in batches of TRANSACTION_BATCH_SIZE (500)
+        for (let i = 0; i < sanitizedNodes.length; i += TRANSACTION_BATCH_SIZE) {
+          const nodeBatch = sanitizedNodes.slice(i, i + TRANSACTION_BATCH_SIZE);
+          await this.runTransaction(db, ['nodes', 'source_spans'], 'readwrite', (tx) => {
+            const nodeStore = tx.objectStore('nodes');
+            const spanStore = tx.objectStore('source_spans');
+
+            for (const node of nodeBatch) {
+              nodeStore.put(node);
+              if (node.sourceSpans) {
+                for (const span of node.sourceSpans) {
+                  spanStore.put(span);
                 }
-              });
-            }
-
-            // 2b. Store Nodes & Source Spans in batches of TRANSACTION_BATCH_SIZE (500)
-            for (let i = 0; i < sanitizedNodes.length; i += TRANSACTION_BATCH_SIZE) {
-              const nodeBatch = sanitizedNodes.slice(i, i + TRANSACTION_BATCH_SIZE);
-              await new Promise<void>((resolve, reject) => {
-                try {
-                  const tx = db.transaction(['nodes', 'source_spans'], 'readwrite');
-                  tx.onerror = () => reject(new Error(`IndexedDB node batch transaction failed: ${tx.error?.message}`));
-                  tx.onabort = () => reject(new Error(`IndexedDB node batch transaction aborted: ${tx.error?.message}`));
-
-                  const nodeStore = tx.objectStore('nodes');
-                  const spanStore = tx.objectStore('source_spans');
-
-                  for (const node of nodeBatch) {
-                    const nodeReq = nodeStore.put(node);
-                    nodeReq.onerror = () => reject(nodeReq.error);
-
-                    if (node.sourceSpans) {
-                      for (const span of node.sourceSpans) {
-                        const spanReq = spanStore.put(span);
-                        spanReq.onerror = () => reject(spanReq.error);
-                      }
-                    }
-                  }
-
-                  tx.oncomplete = () => resolve();
-                } catch (err) {
-                  reject(err);
-                }
-              });
-            }
-
-            // 2c. Store Edges in batches of TRANSACTION_BATCH_SIZE (500)
-            for (let i = 0; i < validEdges.length; i += TRANSACTION_BATCH_SIZE) {
-              const edgeBatch = validEdges.slice(i, i + TRANSACTION_BATCH_SIZE);
-              await new Promise<void>((resolve, reject) => {
-                try {
-                  const tx = db.transaction(['edges'], 'readwrite');
-                  tx.onerror = () => reject(new Error(`IndexedDB edge batch transaction failed: ${tx.error?.message}`));
-                  tx.onabort = () => reject(new Error(`IndexedDB edge batch transaction aborted: ${tx.error?.message}`));
-
-                  const edgeStore = tx.objectStore('edges');
-                  for (const edge of edgeBatch) {
-                    const edgeReq = edgeStore.put(edge);
-                    edgeReq.onerror = () => reject(edgeReq.error);
-                  }
-
-                  tx.oncomplete = () => resolve();
-                } catch (err) {
-                  reject(err);
-                }
-              });
-            }
-
-            // 2d. Store Hash Fingerprint
-            await new Promise<void>((resolve, reject) => {
-              try {
-                const tx = db.transaction(['file_hashes'], 'readwrite');
-                tx.onerror = () => reject(new Error(`IndexedDB hash transaction failed: ${tx.error?.message}`));
-                tx.onabort = () => reject(new Error(`IndexedDB hash transaction aborted: ${tx.error?.message}`));
-
-                const hashStore = tx.objectStore('file_hashes');
-                const hashReq = hashStore.put({ hash, timestamp: Date.now() });
-                hashReq.onerror = () => reject(hashReq.error);
-
-                tx.oncomplete = () => resolve();
-              } catch (err) {
-                reject(err);
               }
-            });
-          })(),
-          new Promise<void>((_, reject) =>
-            setTimeout(() => reject(new Error('IndexedDB commit timeout')), 4000)
-          )
-        ]);
+            }
+          });
+        }
+
+        // 2c. Store Edges in batches of TRANSACTION_BATCH_SIZE (500)
+        for (let i = 0; i < validEdges.length; i += TRANSACTION_BATCH_SIZE) {
+          const edgeBatch = validEdges.slice(i, i + TRANSACTION_BATCH_SIZE);
+          await this.runTransaction(db, ['edges'], 'readwrite', (tx) => {
+            const edgeStore = tx.objectStore('edges');
+            for (const edge of edgeBatch) {
+              edgeStore.put(edge);
+            }
+          });
+        }
+
+        // 2d. Store Hash Fingerprint
+        await this.runTransaction(db, ['file_hashes'], 'readwrite', (tx) => {
+          tx.objectStore('file_hashes').put({ hash, timestamp: Date.now() });
+        });
       } catch (idbErr) {
-        console.warn('[GraphStorage] IndexedDB write failed or timed out, committing to synchronous in-memory store:', idbErr);
+        const isQuota =
+          idbErr instanceof DOMException &&
+          (idbErr.name === 'QuotaExceededError' || idbErr.code === 22);
+        console.warn(
+          isQuota
+            ? '[GraphStorage] IndexedDB quota exceeded; persisting in synchronous memory cache only:'
+            : '[GraphStorage] IndexedDB write failed or timed out, committing to synchronous in-memory store:',
+          idbErr
+        );
       }
     }
 
@@ -554,25 +576,23 @@ class GraphStorageEngine {
    * Creates and persists a custom conceptual node with an optional initial incident edge
    */
   public async createCustomNode(node: GraphNode, parentEdge?: GraphEdge): Promise<void> {
+    const safeNode = sanitizeNode(node);
     const db = await this.getDb();
     if (db) {
       try {
-        await new Promise<void>((resolve, reject) => {
-          const stores = parentEdge ? ['nodes', 'edges'] : ['nodes'];
-          const tx = db.transaction(stores, 'readwrite');
-          tx.oncomplete = () => resolve();
-          tx.onerror = () => reject(tx.error);
-          tx.objectStore('nodes').put(node);
+        const stores = parentEdge ? ['nodes', 'edges'] : ['nodes'];
+        await this.runTransaction(db, stores, 'readwrite', (tx) => {
+          tx.objectStore('nodes').put(safeNode);
           if (parentEdge) {
             tx.objectStore('edges').put(parentEdge);
           }
         });
-      } catch {
-        // Graceful in-memory fallback
+      } catch (err) {
+        console.warn('[GraphStorage] createCustomNode IDB fallback:', err);
       }
     }
 
-    this.cachedNodes.set(node.id, node);
+    this.cachedNodes.set(safeNode.id, safeNode);
     if (parentEdge) {
       this.cachedEdges.set(parentEdge.id, parentEdge);
     }
@@ -597,14 +617,11 @@ class GraphStorageEngine {
     const db = await this.getDb();
     if (db) {
       try {
-        await new Promise<void>((resolve, reject) => {
-          const tx = db.transaction(['nodes'], 'readwrite');
-          tx.oncomplete = () => resolve();
-          tx.onerror = () => reject(tx.error);
+        await this.runTransaction(db, ['nodes'], 'readwrite', (tx) => {
           tx.objectStore('nodes').put(updated);
         });
-      } catch {
-        // Fallback
+      } catch (err) {
+        console.warn('[GraphStorage] updateNodeTitle IDB fallback:', err);
       }
     }
 
@@ -628,18 +645,15 @@ class GraphStorageEngine {
     const db = await this.getDb();
     if (db) {
       try {
-        await new Promise<void>((resolve, reject) => {
-          const tx = db.transaction(['nodes', 'edges'], 'readwrite');
-          tx.oncomplete = () => resolve();
-          tx.onerror = () => reject(tx.error);
+        await this.runTransaction(db, ['nodes', 'edges'], 'readwrite', (tx) => {
           tx.objectStore('nodes').delete(nodeId);
           const edgeStore = tx.objectStore('edges');
           for (const edgeId of deletedEdgeIds) {
             edgeStore.delete(edgeId);
           }
         });
-      } catch {
-        // Fallback to cache deletion
+      } catch (err) {
+        console.warn('[GraphStorage] deleteNodeWithCascade IDB fallback:', err);
       }
     }
 
@@ -679,9 +693,9 @@ class GraphStorageEngine {
     const lower = query.toLowerCase().trim();
     if (!lower) return [];
     return Array.from(this.cachedNodes.values()).filter(n =>
-      n.label.toLowerCase().includes(lower) ||
-      n.title.toLowerCase().includes(lower) ||
-      n.description.toLowerCase().includes(lower)
+      (n.label || '').toLowerCase().includes(lower) ||
+      (n.title || '').toLowerCase().includes(lower) ||
+      (n.description || '').toLowerCase().includes(lower)
     );
   }
 

@@ -10,7 +10,11 @@ import type {
   GraphEdge
 } from '../../types/graph';
 import { generateScopedId, sanitizeDisplayText } from '../../utils/crypto';
-import { BaseParser, type FileParser, type ParserOptions } from './BaseParser';
+import { BaseParser, type FileParser, type ParserOptions, yieldToMain } from './BaseParser';
+
+export const MAX_NODES_PER_DOCUMENT = 2500;
+export const MAX_NODE_TEXT_CHARS = 2000;
+const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 export class JsonParser extends BaseParser implements FileParser {
   canHandle(mimeType: string, extension: string): boolean {
@@ -18,7 +22,10 @@ export class JsonParser extends BaseParser implements FileParser {
     return ext === '.json' || mimeType === 'application/json';
   }
 
-  async parse(file: File, fileHash: string, _options?: ParserOptions): Promise<ParsedPayload> {
+  async parse(file: File, fileHash: string, options?: ParserOptions): Promise<ParsedPayload> {
+    if (options?.signal?.aborted) {
+      throw new Error('JSON parsing aborted due to timeout or cancellation.');
+    }
     const rawText = await file.text();
     const docId = generateScopedId('doc', fileHash, file.name);
     const fileName = file.name;
@@ -35,12 +42,25 @@ export class JsonParser extends BaseParser implements FileParser {
     const nodes: GraphNode[] = [];
     const edges: GraphEdge[] = [];
     const seenNodeIds = new Set<string>();
+    const nodeMap = new Map<string, GraphNode>();
 
-    const addNode = (n: GraphNode) => {
+    const addNode = (n: GraphNode): boolean => {
+      if (nodes.length >= MAX_NODES_PER_DOCUMENT) {
+        return false;
+      }
       if (!seenNodeIds.has(n.id)) {
         seenNodeIds.add(n.id);
+        if (n.content && n.content.length > MAX_NODE_TEXT_CHARS) {
+          n.content = n.content.substring(0, MAX_NODE_TEXT_CHARS) + '… [truncated]';
+        }
+        if (n.description && n.description.length > MAX_NODE_TEXT_CHARS) {
+          n.description = n.description.substring(0, MAX_NODE_TEXT_CHARS) + '… [truncated]';
+        }
         nodes.push(n);
+        nodeMap.set(n.id, n);
+        return true;
       }
+      return true;
     };
 
     const docHub = this.createDocumentHubNode(
@@ -67,11 +87,21 @@ export class JsonParser extends BaseParser implements FileParser {
 
       const idMap = new Map<string, string>();
 
-      for (let i = 0; i < rawNodes.length; i++) {
-        const item = rawNodes[i] as Record<string, unknown>;
-        const origId = String(item.id || `node_${i}`);
-        const title = String(item.title || item.label || item.name || `Node ${i + 1}`);
-        const description = String(item.description || item.content || title);
+      for (let i = 0; i < rawNodes.length && nodes.length < MAX_NODES_PER_DOCUMENT; i++) {
+        if (i % 200 === 0 && i > 0) {
+          if (options?.signal?.aborted) throw new Error('JSON parsing aborted.');
+          options?.onProgress?.(`Parsing JSON nodes (${Math.round((i / rawNodes.length) * 100)}%)...`);
+          await yieldToMain();
+        }
+        const rawItem = rawNodes[i];
+        if (!rawItem || typeof rawItem !== 'object') continue;
+        const item = rawItem as Record<string, unknown>;
+        const origId =
+          item.id !== undefined && item.id !== null && String(item.id).trim() !== ''
+            ? String(item.id)
+            : `node_${i}`;
+        const title = String(item.title ?? item.label ?? item.name ?? `Node ${i + 1}`) || `Node ${i + 1}`;
+        const description = String(item.description ?? item.content ?? title) || title;
         const classification = this.classifyExcerpt(`${title} ${description}`);
 
         const scopedNodeId = generateScopedId('concept', fileHash, origId);
@@ -81,7 +111,7 @@ export class JsonParser extends BaseParser implements FileParser {
           docId,
           fileHash,
           fileName,
-          JSON.stringify(item, null, 2),
+          JSON.stringify(item, null, 2).substring(0, MAX_NODE_TEXT_CHARS),
           0,
           0,
           [docTitle, title]
@@ -123,28 +153,43 @@ export class JsonParser extends BaseParser implements FileParser {
           isIngested: true,
           documentId: docId
         };
-        addNode(graphNode);
-
-        // Edge from Document Hub to node
-        edges.push(
-          this.createEdge(
-            fileHash,
-            docId,
-            graphNode.id,
-            'contains',
-            'structural',
-            'source-explicit',
-            span.spanId
-          )
-        );
+        if (addNode(graphNode)) {
+          // Edge from Document Hub to node
+          edges.push(
+            this.createEdge(
+              fileHash,
+              docId,
+              graphNode.id,
+              'contains',
+              'structural',
+              'source-explicit',
+              span.spanId
+            )
+          );
+        }
       }
 
       // Process explicit edges
-      for (const e of rawEdges) {
+      for (let i = 0; i < rawEdges.length; i++) {
+        if (i % 500 === 0 && i > 0) {
+          if (options?.signal?.aborted) throw new Error('JSON parsing aborted.');
+          await yieldToMain();
+        }
+        const e = rawEdges[i];
         if (typeof e === 'object' && e !== null) {
           const edgeObj = e as Record<string, unknown>;
-          const rawSource = String(edgeObj.source || edgeObj.from || '');
-          const rawTarget = String(edgeObj.target || edgeObj.to || '');
+          const rawSourceVal =
+            edgeObj.source !== undefined && edgeObj.source !== null && String(edgeObj.source) !== ''
+              ? edgeObj.source
+              : edgeObj.from;
+          const rawTargetVal =
+            edgeObj.target !== undefined && edgeObj.target !== null && String(edgeObj.target) !== ''
+              ? edgeObj.target
+              : edgeObj.to;
+          const rawSource =
+            rawSourceVal !== undefined && rawSourceVal !== null ? String(rawSourceVal) : '';
+          const rawTarget =
+            rawTargetVal !== undefined && rawTargetVal !== null ? String(rawTargetVal) : '';
           const mappedSource = idMap.get(rawSource);
           const mappedTarget = idMap.get(rawTarget);
 
@@ -167,7 +212,12 @@ export class JsonParser extends BaseParser implements FileParser {
     }
     // Case 2: Array of objects (e.g. concept collections)
     else if (Array.isArray(parsedData)) {
-      for (let i = 0; i < parsedData.length; i++) {
+      for (let i = 0; i < parsedData.length && nodes.length < MAX_NODES_PER_DOCUMENT; i++) {
+        if (i % 200 === 0 && i > 0) {
+          if (options?.signal?.aborted) throw new Error('JSON parsing aborted.');
+          options?.onProgress?.(`Parsing JSON records (${Math.round((i / parsedData.length) * 100)}%)...`);
+          await yieldToMain();
+        }
         const item = parsedData[i];
         if (typeof item === 'object' && item !== null) {
           const record = item as Record<string, unknown>;
@@ -179,7 +229,7 @@ export class JsonParser extends BaseParser implements FileParser {
             docId,
             fileHash,
             fileName,
-            JSON.stringify(record, null, 2),
+            JSON.stringify(record, null, 2).substring(0, MAX_NODE_TEXT_CHARS),
             0,
             0,
             [docTitle, title]
@@ -199,26 +249,34 @@ export class JsonParser extends BaseParser implements FileParser {
             classification.group,
             'source-explicit'
           );
-          addNode(node);
-
-          edges.push(
-            this.createEdge(
-              fileHash,
-              docId,
-              node.id,
-              'contains',
-              'structural',
-              'source-explicit',
-              span.spanId
-            )
-          );
+          if (addNode(node)) {
+            edges.push(
+              this.createEdge(
+                fileHash,
+                docId,
+                node.id,
+                'contains',
+                'structural',
+                'source-explicit',
+                span.spanId
+              )
+            );
+          }
         }
       }
     }
     // Case 3: Arbitrary object tree
     else if (typeof parsedData === 'object' && parsedData !== null) {
       const rootObj = parsedData as Record<string, unknown>;
-      for (const [key, value] of Object.entries(rootObj)) {
+      const entries = Object.entries(rootObj);
+      for (let i = 0; i < entries.length && nodes.length < MAX_NODES_PER_DOCUMENT; i++) {
+        if (i % 200 === 0 && i > 0) {
+          if (options?.signal?.aborted) throw new Error('JSON parsing aborted.');
+          await yieldToMain();
+        }
+        const [key, value] = entries[i];
+        if (DANGEROUS_KEYS.has(key)) continue;
+
         const keyTitle = key.replace(/[-_]/g, ' ');
         const valStr = typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
         const classification = this.classifyExcerpt(`${keyTitle} ${valStr}`);
@@ -227,7 +285,7 @@ export class JsonParser extends BaseParser implements FileParser {
           docId,
           fileHash,
           fileName,
-          `"${key}": ${valStr}`,
+          `"${key}": ${valStr}`.substring(0, MAX_NODE_TEXT_CHARS),
           0,
           0,
           [docTitle, keyTitle]
@@ -247,26 +305,26 @@ export class JsonParser extends BaseParser implements FileParser {
           classification.group,
           'source-explicit'
         );
-        addNode(node);
-
-        edges.push(
-          this.createEdge(
-            fileHash,
-            docId,
-            node.id,
-            'contains',
-            'structural',
-            'source-explicit',
-            span.spanId
-          )
-        );
+        if (addNode(node)) {
+          edges.push(
+            this.createEdge(
+              fileHash,
+              docId,
+              node.id,
+              'contains',
+              'structural',
+              'source-explicit',
+              span.spanId
+            )
+          );
+        }
       }
     }
 
-    // Connect node IDs
+    // Connect node IDs in O(E)
     for (const edge of edges) {
-      const srcNode = nodes.find(n => n.id === edge.source);
-      const tgtNode = nodes.find(n => n.id === edge.target);
+      const srcNode = nodeMap.get(edge.source);
+      const tgtNode = nodeMap.get(edge.target);
       if (srcNode && !srcNode.connectedNodeIds.includes(edge.target)) {
         srcNode.connectedNodeIds.push(edge.target);
       }

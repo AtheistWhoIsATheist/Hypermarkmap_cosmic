@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import type { NodeCitation, NodeMetadataRecord, EpistemicTopologyNode } from '../types';
 import { normalizeEpistemicNode } from './GroundedEpistemicTopologyData';
+import { sanitizeExternalUrl } from '../utils/url';
 
 interface NodeInspectorDrawerProps {
   node: EpistemicTopologyNode | null;
@@ -89,19 +90,28 @@ const MarkdownOverview: React.FC<{ content: string }> = ({ content }) => {
           </code>
         );
       } else if (fullMatch.startsWith('[')) {
-        parts.push(
-          <a
-            key={keyIdx++}
-            href={match[6]}
-            target="_blank"
-            rel="noopener noreferrer"
-            referrerPolicy="no-referrer"
-            className="text-cyan-400 hover:text-cyan-300 underline underline-offset-2 transition inline-flex items-center gap-0.5 break-all"
-          >
-            {match[5]}
-            <ExternalLink className="w-2.5 h-2.5 inline ml-0.5" />
-          </a>
-        );
+        const safeHref = sanitizeExternalUrl(match[6]);
+        if (safeHref) {
+          parts.push(
+            <a
+              key={keyIdx++}
+              href={safeHref}
+              target="_blank"
+              rel="noopener noreferrer"
+              referrerPolicy="no-referrer"
+              className="text-cyan-400 hover:text-cyan-300 underline underline-offset-2 transition inline-flex items-center gap-0.5 break-all"
+            >
+              {match[5]}
+              <ExternalLink className="w-2.5 h-2.5 inline ml-0.5" />
+            </a>
+          );
+        } else {
+          parts.push(
+            <span key={keyIdx++} className="text-slate-400 underline decoration-dotted underline-offset-2">
+              {match[5]}
+            </span>
+          );
+        }
       }
 
       remaining = remaining.substring(matchIdx + fullMatch.length);
@@ -194,6 +204,7 @@ export const NodeInspectorDrawer: React.FC<NodeInspectorDrawerProps> = ({
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const asideRef = useRef<HTMLElement | null>(null);
   const editTitleInputRef = useRef<HTMLInputElement | null>(null);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Animation and mount lifecycle states
   const [isMounted, setIsMounted] = useState<boolean>(false);
@@ -243,15 +254,22 @@ export const NodeInspectorDrawer: React.FC<NodeInspectorDrawerProps> = ({
   useEffect(() => {
     if (isOpen && normalizedNode) {
       setIsMounted(true);
+      let cancelled = false;
+      let frame2 = 0;
       // Double rAF ensures the translate-x-full frame is painted before transitioning to translate-x-0
       const frame1 = requestAnimationFrame(() => {
-        const frame2 = requestAnimationFrame(() => {
+        if (cancelled) return;
+        frame2 = requestAnimationFrame(() => {
+          if (cancelled) return;
           setIsVisible(true);
           closeButtonRef.current?.focus();
         });
-        return () => cancelAnimationFrame(frame2);
       });
-      return () => cancelAnimationFrame(frame1);
+      return () => {
+        cancelled = true;
+        cancelAnimationFrame(frame1);
+        if (frame2) cancelAnimationFrame(frame2);
+      };
     } else {
       setIsVisible(false);
       const timer = setTimeout(() => {
@@ -287,17 +305,24 @@ export const NodeInspectorDrawer: React.FC<NodeInspectorDrawerProps> = ({
     };
   }, [isOpen, onClose, isEditingTitle, normalizedNode?.title, onRenameNode]);
 
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    };
+  }, []);
+
   // Copy node ID to clipboard
   const handleCopyId = useCallback(async () => {
     if (!normalizedNode) return;
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
     try {
       await navigator.clipboard.writeText(normalizedNode.id);
       setCopiedId(true);
-      setTimeout(() => setCopiedId(false), 2000);
+      copyTimerRef.current = setTimeout(() => setCopiedId(false), 2000);
     } catch {
       // Fallback
       setCopiedId(true);
-      setTimeout(() => setCopiedId(false), 2000);
+      copyTimerRef.current = setTimeout(() => setCopiedId(false), 2000);
     }
   }, [normalizedNode]);
 
@@ -623,18 +648,21 @@ export const NodeInspectorDrawer: React.FC<NodeInspectorDrawerProps> = ({
                       <h5 className="font-sans font-medium text-xs text-slate-200 break-words flex-1 leading-snug">
                         {citation.sourceTitle}
                       </h5>
-                      {citation.referenceUrl && (
-                        <a
-                          href={citation.referenceUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          referrerPolicy="no-referrer"
-                          title="Open external source reference"
-                          className="text-cyan-400 hover:text-cyan-300 p-1 rounded hover:bg-slate-800/60 transition shrink-0"
-                        >
-                          <ExternalLink className="w-3.5 h-3.5" />
-                        </a>
-                      )}
+                      {(() => {
+                        const safeRefUrl = sanitizeExternalUrl(citation.referenceUrl);
+                        return safeRefUrl ? (
+                          <a
+                            href={safeRefUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            referrerPolicy="no-referrer"
+                            title="Open external source reference"
+                            className="text-cyan-400 hover:text-cyan-300 p-1 rounded hover:bg-slate-800/60 transition shrink-0"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5" />
+                          </a>
+                        ) : null;
+                      })()}
                     </div>
 
                     {/* Author or Origin */}

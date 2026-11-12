@@ -358,6 +358,7 @@ export function projectViewGraph(params: {
   if (ingestedGraph.nodes.length > 0) {
     const docHubs = ingestedGraph.nodes.filter((n) => n.nodeKind === 'document-hub');
     const nonHubs = ingestedGraph.nodes.filter((n) => n.nodeKind !== 'document-hub');
+    const assignedIds = new Set<string>(positioned.map((p) => p.id));
 
     const hubCount = Math.max(docHubs.length, 1);
     const hubAngleStep = (Math.PI * 2) / hubCount;
@@ -431,6 +432,7 @@ export function projectViewGraph(params: {
         priorityScore: 4500
       };
       positioned.push(hubPos);
+      assignedIds.add(hubPos.id);
 
       // If collapsed in Tier 0 or folded in Smart/Architecture mode, register count and stop here
       if (isTier0Collapsed || (!isClusterExpanded && totalFileCount > 60)) {
@@ -530,6 +532,7 @@ export function projectViewGraph(params: {
           priorityScore: 2800
         };
         positioned.push(secPos);
+        assignedIds.add(secPos.id);
 
         // If Section children are folded, count hidden and do not layout children
         if (!isSecExpanded && !isSecExplicitlyExpanded && lodTier < 2) {
@@ -603,11 +606,11 @@ export function projectViewGraph(params: {
             priorityScore: isProposition ? 300 : 1200
           };
           positioned.push(conceptPos);
+          assignedIds.add(conceptPos.id);
         });
       });
 
       // Handle unassigned/orphan concepts within Document Hub via Vogel's Spiral
-      const assignedIds = new Set(positioned.map((p) => p.id));
       const orphanConcepts = fileNodes.filter((n) => !assignedIds.has(n.id));
 
       if (isClusterExpanded) {
@@ -666,6 +669,7 @@ export function projectViewGraph(params: {
             clusterId: hub.id,
             priorityScore: isProposition ? 250 : 1000
           });
+          assignedIds.add(orphan.id);
         });
       } else {
         hiddenInCluster += orphanConcepts.length;
@@ -678,8 +682,7 @@ export function projectViewGraph(params: {
     });
 
     // Handle standalone or custom concept nodes not attached to an ingested docHub
-    const positionedIds = new Set(positioned.map((p) => p.id));
-    const standaloneNodes = ingestedGraph.nodes.filter((n) => !positionedIds.has(n.id));
+    const standaloneNodes = ingestedGraph.nodes.filter((n) => !assignedIds.has(n.id));
     if (standaloneNodes.length > 0) {
       standaloneNodes.forEach((sNode, sIdx) => {
         let posX = sNode.x;
@@ -768,7 +771,17 @@ export function projectViewGraph(params: {
     }
   });
 
-  // Step 4: Edge Bundling & Parallel Aggregation
+  // Step 4: Edge Bundling & Parallel Aggregation (O(N + E) via pre-indexed Maps)
+  const rawNodeById = new Map<string, GraphNode>();
+  ingestedGraph.nodes.forEach((n) => rawNodeById.set(n.id, n));
+
+  const hubByClusterId = new Map<string, PositionedVisualNode>();
+  positioned.forEach((p) => {
+    if (p.isClusterHub && p.clusterId) {
+      hubByClusterId.set(p.clusterId, p);
+    }
+  });
+
   const bundledEdges: BundledVisualEdge[] = [];
   const edgeGroups = new Map<string, { edges: GraphEdge[]; sourceNode: PositionedVisualNode; targetNode: PositionedVisualNode }>();
 
@@ -778,15 +791,15 @@ export function projectViewGraph(params: {
 
     // If source or target is folded into a cluster, redirect link to the cluster hub
     if (!sNode) {
-      const srcRaw = ingestedGraph.nodes.find((n) => n.id === edge.source);
-      if (srcRaw) {
-        sNode = positioned.find((p) => p.isClusterHub && p.clusterId === srcRaw.documentId);
+      const srcRaw = rawNodeById.get(edge.source);
+      if (srcRaw?.documentId) {
+        sNode = hubByClusterId.get(srcRaw.documentId);
       }
     }
     if (!tNode) {
-      const tgtRaw = ingestedGraph.nodes.find((n) => n.id === edge.target);
-      if (tgtRaw) {
-        tNode = positioned.find((p) => p.isClusterHub && p.clusterId === tgtRaw.documentId);
+      const tgtRaw = rawNodeById.get(edge.target);
+      if (tgtRaw?.documentId) {
+        tNode = hubByClusterId.get(tgtRaw.documentId);
       }
     }
 

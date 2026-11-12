@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   BookOpen,
   ChevronLeft,
@@ -23,47 +23,90 @@ export const ManuscriptView: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(true);
   const [searchFilter, setSearchFilter] = useState<string>('');
   const [copied, setCopied] = useState<boolean>(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
   const [showMetadata, setShowMetadata] = useState<boolean>(true);
+  const mountedRef = useRef<boolean>(true);
+  const chaptersAbortRef = useRef<AbortController | null>(null);
+  const chapterAbortRef = useRef<AbortController | null>(null);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    loadChapters();
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      chaptersAbortRef.current?.abort();
+      chapterAbortRef.current?.abort();
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    };
+  }, []);
+
+  const loadChapters = useCallback(async () => {
+    chaptersAbortRef.current?.abort();
+    const controller = new AbortController();
+    chaptersAbortRef.current = controller;
+
+    try {
+      setLoading(true);
+      const data = await api.getManuscriptChapters(controller.signal);
+      if (!mountedRef.current || chaptersAbortRef.current !== controller) return;
+      setChapters(data);
+      if (data.length > 0) {
+        setSelectedChapterNum((prev) => prev || data[0].chapter_number);
+      }
+    } catch (err: any) {
+      if (err?.name === 'AbortError' || controller.signal.aborted) return;
+      console.error('Failed to load chapters:', err);
+    } finally {
+      if (mountedRef.current && chaptersAbortRef.current === controller) {
+        setLoading(false);
+      }
+    }
+  }, []);
+
+  const loadChapter = useCallback(async (num: number) => {
+    chapterAbortRef.current?.abort();
+    const controller = new AbortController();
+    chapterAbortRef.current = controller;
+
+    try {
+      const data = await api.getManuscriptChapter(num, controller.signal);
+      if (!mountedRef.current || chapterAbortRef.current !== controller) return;
+      setCurrentChapter(data);
+    } catch (err: any) {
+      if (err?.name === 'AbortError' || controller.signal.aborted) return;
+      console.error('Failed to load chapter details:', err);
+    }
   }, []);
 
   useEffect(() => {
+    void loadChapters();
+  }, [loadChapters]);
+
+  useEffect(() => {
     if (selectedChapterNum) {
-      loadChapter(selectedChapterNum);
+      void loadChapter(selectedChapterNum);
     }
-  }, [selectedChapterNum]);
+  }, [selectedChapterNum, loadChapter]);
 
-  const loadChapters = async () => {
-    try {
-      setLoading(true);
-      const data = await api.getManuscriptChapters();
-      setChapters(data);
-      if (data.length > 0 && !currentChapter) {
-        setSelectedChapterNum(data[0].chapter_number);
-      }
-    } catch (err) {
-      console.error('Failed to load chapters:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const loadChapter = async (num: number) => {
-    try {
-      const data = await api.getManuscriptChapter(num);
-      setCurrentChapter(data);
-    } catch (err) {
-      console.error('Failed to load chapter details:', err);
-    }
-  };
-
-  const handleCopyMarkdown = () => {
+  const handleCopyMarkdown = async () => {
     if (!currentChapter) return;
-    navigator.clipboard.writeText(currentChapter.full_text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    setCopyError(null);
+    try {
+      if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
+        throw new Error('Clipboard API unavailable');
+      }
+      await navigator.clipboard.writeText(currentChapter.full_text);
+      if (!mountedRef.current) return;
+      setCopied(true);
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = setTimeout(() => {
+        if (mountedRef.current) setCopied(false);
+      }, 2000);
+    } catch {
+      if (mountedRef.current) {
+        setCopyError('Clipboard unavailable in this browser context');
+      }
+    }
   };
 
   const filteredChapters = chapters.filter(
@@ -161,7 +204,7 @@ export const ManuscriptView: React.FC = () => {
                   </button>
 
                   <button
-                    onClick={handleCopyMarkdown}
+                    onClick={() => void handleCopyMarkdown()}
                     className="text-xs px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded border border-zinc-700 flex items-center space-x-1 transition"
                     title="Copy full chapter markdown to clipboard"
                   >
@@ -179,6 +222,11 @@ export const ManuscriptView: React.FC = () => {
                   </button>
                 </div>
               </div>
+              {copyError && (
+                <div role="alert" className="mb-2 text-xs font-mono text-amber-300">
+                  {copyError}
+                </div>
+              )}
 
               <h1 className="text-2xl sm:text-3xl font-serif font-bold text-zinc-100 tracking-tight">
                 {currentChapter.title}

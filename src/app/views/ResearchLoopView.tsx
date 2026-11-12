@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Cpu,
   RefreshCw,
@@ -22,35 +22,58 @@ export const ResearchLoopView: React.FC = () => {
   const [focusArea, setFocusArea] = useState<string>('Cross-Corpus Dialectic: Eckhart vs Nagarjuna on Void');
   const [maxClaims, setMaxClaims] = useState<number>(3);
   const [lastResult, setLastResult] = useState<any | null>(null);
+  const [jobError, setJobError] = useState<string | null>(null);
+
+  const mountedRef = useRef<boolean>(true);
+  const jobsAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    loadJobs();
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      jobsAbortRef.current?.abort();
+    };
   }, []);
 
-  const loadJobs = async () => {
+  const loadJobs = useCallback(async () => {
+    jobsAbortRef.current?.abort();
+    const controller = new AbortController();
+    jobsAbortRef.current = controller;
+
     try {
       setLoading(true);
-      const data = await api.getJobs();
+      const data = await api.getJobs(controller.signal);
+      if (!mountedRef.current || jobsAbortRef.current !== controller) return;
       setJobs(data);
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.name === 'AbortError' || controller.signal.aborted) return;
       console.error('Failed to load jobs:', err);
     } finally {
-      setLoading(false);
+      if (mountedRef.current && jobsAbortRef.current === controller) {
+        setLoading(false);
+      }
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    void loadJobs();
+  }, [loadJobs]);
 
   const handleRunLoop = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
       setRunningJob(true);
       setLastResult(null);
+      setJobError(null);
       const res = await api.runResearchLoopStep(focusArea, maxClaims);
+      if (!mountedRef.current) return;
       setLastResult(res);
       await loadJobs();
     } catch (err: any) {
-      alert(`Research Loop failed: ${err.message}`);
+      if (!mountedRef.current) return;
+      setJobError(`Research Loop failed: ${err?.message || 'Unknown error'}`);
     } finally {
-      setRunningJob(false);
+      if (mountedRef.current) setRunningJob(false);
     }
   };
 
@@ -147,6 +170,23 @@ export const ResearchLoopView: React.FC = () => {
         </div>
       </form>
 
+      {/* Research Loop Error Banner */}
+      {jobError && (
+        <div role="alert" className="bg-rose-950/60 border border-rose-500/40 rounded-xl p-4 text-xs font-mono text-rose-200 flex items-center justify-between gap-2">
+          <span className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+            <span>{jobError}</span>
+          </span>
+          <button
+            type="button"
+            onClick={() => setJobError(null)}
+            className="text-rose-300 hover:text-white underline text-[11px]"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* Latest Run Result Output */}
       {lastResult && (
         <div className="bg-zinc-900/90 border border-emerald-500/30 rounded-xl p-5 space-y-3 shadow-lg">
@@ -173,7 +213,7 @@ export const ResearchLoopView: React.FC = () => {
             </div>
             <div className="p-2.5 rounded bg-zinc-950 border border-zinc-800">
               <span className="text-zinc-500 block">Tokens Consumed:</span>
-              <span className="text-blue-400 font-bold text-sm">{lastResult.job.total_tokens?.toLocaleString() || '1,420'}</span>
+              <span className="text-blue-400 font-bold text-sm">{(lastResult.job.total_tokens ?? 0).toLocaleString()}</span>
             </div>
           </div>
 

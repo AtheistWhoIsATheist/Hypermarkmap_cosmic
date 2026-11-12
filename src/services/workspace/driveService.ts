@@ -25,6 +25,17 @@ export interface ListFilesResult {
 }
 
 export const GOOGLE_DOCS_MIME = 'application/vnd.google-apps.document';
+const WORKSPACE_FETCH_TIMEOUT_MS = 30000;
+
+async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), WORKSPACE_FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: init.signal || controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * List files from the user's Google Drive.
@@ -52,7 +63,7 @@ export async function listDriveFiles(options: ListFilesOptions = {}): Promise<Li
   }
 
   if (options.query && options.query.trim()) {
-    const sanitized = options.query.replace(/'/g, "\\'");
+    const sanitized = options.query.trim().replace(/\\/g, '\\\\').replace(/'/g, "\\'");
     queryParts.push(`name contains '${sanitized}'`);
   }
 
@@ -71,7 +82,7 @@ export async function listDriveFiles(options: ListFilesOptions = {}): Promise<Li
     url.searchParams.set('pageToken', options.pageToken);
   }
 
-  const res = await fetch(url.toString(), {
+  const res = await fetchWithTimeout(url.toString(), {
     headers: {
       Authorization: `Bearer ${token}`
     }
@@ -98,8 +109,8 @@ export async function getDriveFile(fileId: string): Promise<DriveFile> {
     throw new Error('Not authenticated. Please sign in with Google to access Drive.');
   }
 
-  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,mimeType,modifiedTime,size,iconLink,webViewLink,parents,description`;
-  const res = await fetch(url, {
+  const url = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id,name,mimeType,modifiedTime,size,iconLink,webViewLink,parents,description`;
+  const res = await fetchWithTimeout(url, {
     headers: {
       Authorization: `Bearer ${token}`
     }
@@ -124,10 +135,12 @@ export async function downloadDriveFileContent(file: DriveFile): Promise<{ conte
     throw new Error('Not authenticated. Please sign in with Google to access Drive.');
   }
 
+  const encodedId = encodeURIComponent(file.id);
+
   if (file.mimeType === GOOGLE_DOCS_MIME) {
     // Export Google Doc as text/plain
-    const exportUrl = `https://www.googleapis.com/drive/v3/files/${file.id}/export?mimeType=text/plain`;
-    const res = await fetch(exportUrl, {
+    const exportUrl = `https://www.googleapis.com/drive/v3/files/${encodedId}/export?mimeType=text/plain`;
+    const res = await fetchWithTimeout(exportUrl, {
       headers: {
         Authorization: `Bearer ${token}`
       }
@@ -143,8 +156,8 @@ export async function downloadDriveFileContent(file: DriveFile): Promise<{ conte
   }
 
   // Non-Google Doc files
-  const downloadUrl = `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`;
-  const res = await fetch(downloadUrl, {
+  const downloadUrl = `https://www.googleapis.com/drive/v3/files/${encodedId}?alt=media`;
+  const res = await fetchWithTimeout(downloadUrl, {
     headers: {
       Authorization: `Bearer ${token}`
     }
@@ -155,7 +168,14 @@ export async function downloadDriveFileContent(file: DriveFile): Promise<{ conte
     throw new Error(`Failed to download file from Drive (${res.status}): ${err}`);
   }
 
-  if (file.mimeType.startsWith('text/') || file.name.endsWith('.md') || file.name.endsWith('.txt') || file.name.endsWith('.json') || file.name.endsWith('.csv')) {
+  const lowerName = (file.name || '').toLowerCase();
+  if (
+    file.mimeType?.startsWith('text/') ||
+    lowerName.endsWith('.md') ||
+    lowerName.endsWith('.txt') ||
+    lowerName.endsWith('.json') ||
+    lowerName.endsWith('.csv')
+  ) {
     const text = await res.text();
     return { content: text };
   }
@@ -174,7 +194,7 @@ export async function deleteDriveFile(fileId: string): Promise<void> {
     throw new Error('Not authenticated. Please sign in with Google to access Drive.');
   }
 
-  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+  const res = await fetchWithTimeout(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`, {
     method: 'DELETE',
     headers: {
       Authorization: `Bearer ${token}`
@@ -197,7 +217,7 @@ export async function trashDriveFile(fileId: string): Promise<void> {
     throw new Error('Not authenticated. Please sign in with Google to access Drive.');
   }
 
-  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+  const res = await fetchWithTimeout(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`, {
     method: 'PATCH',
     headers: {
       Authorization: `Bearer ${token}`,

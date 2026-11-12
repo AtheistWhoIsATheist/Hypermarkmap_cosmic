@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   X,
   FileText,
@@ -48,6 +48,7 @@ import { GraphStorage } from '../storage/GraphStorage';
 import type { EpistemicTopologyNode } from './GroundedEpistemicTopologyData';
 import type { GraphNode, GraphEdge, IngestionBatchItem } from '../types/graph';
 import type { User } from 'firebase/auth';
+import { sanitizeExternalUrl } from '../utils/url';
 
 interface GoogleWorkspaceModalProps {
   isOpen: boolean;
@@ -103,9 +104,18 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
   const [isCreatingDoc, setIsCreatingDoc] = useState(false);
   const [createdDocLink, setCreatedDocLink] = useState<{ id: string; url: string; title: string } | null>(null);
 
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   // Subscribe to Firebase Auth state
   useEffect(() => {
     const unsubscribe = subscribeAuthState((u, token) => {
+      if (!mountedRef.current) return;
       setUser(u);
       setHasToken(Boolean(token));
     });
@@ -123,13 +133,17 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
         mimeTypeFilter: filterType,
         pageSize: 30
       });
+      if (!mountedRef.current) return;
       setFiles(result.files);
     } catch (err: unknown) {
+      if (!mountedRef.current) return;
       console.error('[GoogleWorkspaceModal] Error loading Drive files:', err);
       const msg = err instanceof Error ? err.message : 'Failed to load files from Google Drive';
       setFileActionError(msg);
     } finally {
-      setIsLoadingFiles(false);
+      if (mountedRef.current) {
+        setIsLoadingFiles(false);
+      }
     }
   }, [hasToken, searchQuery, filterType]);
 
@@ -139,26 +153,44 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
     }
   }, [isOpen, hasToken, activeTab, fetchFiles]);
 
+  // Escape key dismissal when no child confirmation modal or active network write is in flight
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.key !== 'Escape') return;
+      if (fileToDelete || isDeleting || isExporting || isCreatingDoc || ingestingFileId) return;
+      e.preventDefault();
+      onClose();
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [isOpen, fileToDelete, isDeleting, isExporting, isCreatingDoc, ingestingFileId, onClose]);
+
   const handleLogin = async () => {
     setIsSigningIn(true);
     setAuthError(null);
     try {
       const result = await googleSignIn();
+      if (!mountedRef.current) return;
       if (result) {
         setUser(result.user);
         setHasToken(true);
       }
     } catch (err: unknown) {
+      if (!mountedRef.current) return;
       console.error('[GoogleWorkspaceModal] Login error:', err);
       setAuthError(err instanceof Error ? err.message : 'Google sign-in failed');
     } finally {
-      setIsSigningIn(false);
+      if (mountedRef.current) {
+        setIsSigningIn(false);
+      }
     }
   };
 
   const handleLogout = async () => {
     try {
       await logout();
+      if (!mountedRef.current) return;
       setUser(null);
       setHasToken(false);
       setFiles([]);
@@ -197,13 +229,17 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
         { processingMode: 'STRUCTURALLY_INGESTED' }
       );
 
+      if (!mountedRef.current) return;
       setFileActionSuccess(`Successfully ingested "${file.name}" into Knowledge Graph with SourceSpan provenance.`);
       onIngestionComplete?.();
     } catch (err: unknown) {
+      if (!mountedRef.current) return;
       console.error('[GoogleWorkspaceModal] Ingestion error:', err);
       setFileActionError(err instanceof Error ? err.message : 'Failed to ingest file into Knowledge Graph');
     } finally {
-      setIngestingFileId(null);
+      if (mountedRef.current) {
+        setIngestingFileId(null);
+      }
     }
   };
 
@@ -214,14 +250,18 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
     setFileActionError(null);
     try {
       await trashDriveFile(fileToDelete.id);
+      if (!mountedRef.current) return;
       setFiles((prev) => prev.filter((f) => f.id !== fileToDelete.id));
       setFileActionSuccess(`Moved "${fileToDelete.name}" to Google Drive trash.`);
       setFileToDelete(null);
     } catch (err: unknown) {
+      if (!mountedRef.current) return;
       console.error('[GoogleWorkspaceModal] Delete error:', err);
       setFileActionError(err instanceof Error ? err.message : 'Failed to delete file');
     } finally {
-      setIsDeleting(false);
+      if (mountedRef.current) {
+        setIsDeleting(false);
+      }
     }
   };
 
@@ -259,6 +299,7 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
         edges: ingestedEdges
       });
 
+      if (!mountedRef.current) return;
       setExportedDocLink({
         id: result.documentId,
         url: result.webViewLink,
@@ -266,10 +307,13 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
       });
       setFileActionSuccess(`Google Doc created: "${result.title}"`);
     } catch (err: unknown) {
+      if (!mountedRef.current) return;
       console.error('[GoogleWorkspaceModal] Export error:', err);
       setFileActionError(err instanceof Error ? err.message : 'Failed to export to Google Docs');
     } finally {
-      setIsExporting(false);
+      if (mountedRef.current) {
+        setIsExporting(false);
+      }
     }
   };
 
@@ -280,6 +324,7 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
     setCreatedDocLink(null);
     try {
       const doc = await createGoogleDoc(newDocTitle.trim() || 'Philosophical Manuscript Draft');
+      if (!mountedRef.current) return;
       const webViewLink = `https://docs.google.com/document/d/${doc.documentId}/edit`;
       setCreatedDocLink({
         id: doc.documentId,
@@ -289,10 +334,13 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
       setFileActionSuccess(`Created Google Doc: "${doc.title || newDocTitle}"`);
       if (hasToken) fetchFiles();
     } catch (err: unknown) {
+      if (!mountedRef.current) return;
       console.error('[GoogleWorkspaceModal] Create Doc error:', err);
       setFileActionError(err instanceof Error ? err.message : 'Failed to create Google Doc');
     } finally {
-      setIsCreatingDoc(false);
+      if (mountedRef.current) {
+        setIsCreatingDoc(false);
+      }
     }
   };
 
@@ -612,17 +660,20 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
                                 </button>
 
                                 {/* Open Link */}
-                                {file.webViewLink && (
-                                  <a
-                                    href={file.webViewLink}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="p-1.5 rounded-lg text-slate-400 hover:text-cyan-300 hover:bg-slate-800 transition"
-                                    title="Open in Google Drive / Docs"
-                                  >
-                                    <ExternalLink className="w-3.5 h-3.5" />
-                                  </a>
-                                )}
+                                {(() => {
+                                  const safeDriveHref = sanitizeExternalUrl(file.webViewLink);
+                                  return safeDriveHref ? (
+                                    <a
+                                      href={safeDriveHref}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="p-1.5 rounded-lg text-slate-400 hover:text-cyan-300 hover:bg-slate-800 transition"
+                                      title="Open in Google Drive / Docs"
+                                    >
+                                      <ExternalLink className="w-3.5 h-3.5" />
+                                    </a>
+                                  ) : null;
+                                })()}
 
                                 {/* Delete / Trash Button (Triggers mandatory user confirmation) */}
                                 <button
@@ -719,17 +770,20 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
                           <span>{isExporting ? 'Creating Google Doc...' : 'Export to Google Docs'}</span>
                         </button>
 
-                        {exportedDocLink && (
-                          <a
-                            href={exportedDocLink.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="px-3 py-1.5 rounded-lg text-xs font-semibold text-emerald-300 bg-emerald-950/70 border border-emerald-500/50 flex items-center gap-1.5 hover:bg-emerald-900/80 transition"
-                          >
-                            <ExternalLink className="w-3.5 h-3.5" />
-                            <span>Open "{exportedDocLink.title}" in Docs</span>
-                          </a>
-                        )}
+                        {(() => {
+                          const safeExportHref = exportedDocLink ? sanitizeExternalUrl(exportedDocLink.url) : null;
+                          return exportedDocLink && safeExportHref ? (
+                            <a
+                              href={safeExportHref}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="px-3 py-1.5 rounded-lg text-xs font-semibold text-emerald-300 bg-emerald-950/70 border border-emerald-500/50 flex items-center gap-1.5 hover:bg-emerald-900/80 transition"
+                            >
+                              <ExternalLink className="w-3.5 h-3.5" />
+                              <span>Open "{exportedDocLink.title}" in Docs</span>
+                            </a>
+                          ) : null;
+                        })()}
                       </div>
                     </div>
                   </div>
@@ -773,17 +827,20 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
                         <span>{isCreatingDoc ? 'Creating Doc...' : 'Create Google Doc'}</span>
                       </button>
 
-                      {createdDocLink && (
-                        <a
-                          href={createdDocLink.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="px-3 py-1.5 rounded-lg text-xs font-semibold text-purple-300 bg-purple-950/70 border border-purple-500/50 flex items-center gap-1.5 hover:bg-purple-900/80 transition"
-                        >
-                          <ExternalLink className="w-3.5 h-3.5" />
-                          <span>Open "{createdDocLink.title}" in Docs</span>
-                        </a>
-                      )}
+                      {(() => {
+                        const safeCreatedHref = createdDocLink ? sanitizeExternalUrl(createdDocLink.url) : null;
+                        return createdDocLink && safeCreatedHref ? (
+                          <a
+                            href={safeCreatedHref}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="px-3 py-1.5 rounded-lg text-xs font-semibold text-purple-300 bg-purple-950/70 border border-purple-500/50 flex items-center gap-1.5 hover:bg-purple-900/80 transition"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5" />
+                            <span>Open "{createdDocLink.title}" in Docs</span>
+                          </a>
+                        ) : null;
+                      })()}
                     </div>
                   </div>
                 )}

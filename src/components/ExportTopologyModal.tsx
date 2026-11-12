@@ -88,7 +88,8 @@ export const ExportTopologyModal: React.FC<ExportTopologyModalProps> = ({
       setExportSuccessInfo(null);
       setExportError(null);
       void refreshPreview();
-      setTimeout(() => downloadButtonRef.current?.focus(), 50);
+      const focusTimer = setTimeout(() => downloadButtonRef.current?.focus(), 50);
+      return () => clearTimeout(focusTimer);
     }
   }, [isOpen, refreshPreview]);
 
@@ -141,10 +142,14 @@ export const ExportTopologyModal: React.FC<ExportTopologyModalProps> = ({
       role="dialog"
       aria-modal="true"
       aria-labelledby="export-modal-title"
+      onClick={() => {
+        if (!isExporting) onClose();
+      }}
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200"
     >
       <div
         ref={modalRef}
+        onClick={(e) => e.stopPropagation()}
         className="relative w-full max-w-xl overflow-hidden rounded-2xl bg-[#0B0E14] border border-cyan-500/40 shadow-[0_16px_48px_rgba(0,0,0,0.85)] flex flex-col"
         style={{ contain: 'content' }}
       >

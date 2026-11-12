@@ -111,6 +111,8 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const appendFileInputRef = useRef<HTMLInputElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fileClickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -138,6 +140,13 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
       return () => document.removeEventListener('keydown', handleKeyDown);
     }
   }, [isOpen, isProcessing, onClose]);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      if (fileClickTimerRef.current) clearTimeout(fileClickTimerRef.current);
+    };
+  }, []);
 
   // Derived Batch Telemetry (useMemo)
   const telemetry = useMemo(() => {
@@ -301,13 +310,14 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
   };
 
   const handleCopyText = async (text: string, id: string) => {
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
     try {
       await navigator.clipboard.writeText(text);
       setCopiedHash(id);
-      setTimeout(() => setCopiedHash(null), 2000);
+      copyTimerRef.current = setTimeout(() => setCopiedHash(null), 2000);
     } catch {
       setCopiedHash(id);
-      setTimeout(() => setCopiedHash(null), 2000);
+      copyTimerRef.current = setTimeout(() => setCopiedHash(null), 2000);
     }
   };
 
@@ -908,7 +918,8 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
                   type="button"
                   onClick={() => {
                     handleClearQueue();
-                    setTimeout(() => fileInputRef.current?.click(), 50);
+                    if (fileClickTimerRef.current) clearTimeout(fileClickTimerRef.current);
+                    fileClickTimerRef.current = setTimeout(() => fileInputRef.current?.click(), 50);
                   }}
                   className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-850 border border-slate-700 text-slate-200 hover:text-white text-xs font-medium flex items-center gap-1.5 transition cursor-pointer"
                 >

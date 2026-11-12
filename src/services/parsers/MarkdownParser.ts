@@ -38,6 +38,7 @@ export class MarkdownParser extends BaseParser implements FileParser {
     const nodes: GraphNode[] = [];
     const edges: GraphEdge[] = [];
     const seenNodeIds = new Set<string>();
+    const nodeMap = new Map<string, GraphNode>();
 
     const addNode = (n: GraphNode): boolean => {
       if (nodes.length >= MAX_NODES_PER_DOCUMENT) {
@@ -53,16 +54,19 @@ export class MarkdownParser extends BaseParser implements FileParser {
           n.description = n.description.substring(0, MAX_NODE_TEXT_CHARS) + '… [truncated]';
         }
         nodes.push(n);
+        nodeMap.set(n.id, n);
         return true;
       }
       return true;
     };
 
     // State machine tracking across stream chunks
+    const MAX_FRONTMATTER_LINES = 120;
+    const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
     let frontmatterDone = false;
     let inFrontmatter = false;
-    let frontmatterLines: string[] = [];
-    let frontmatter: Record<string, string> = {};
+    const frontmatterBuffer: Array<{ line: string; lineNum: number; startChar: number }> = [];
+    const frontmatter: Record<string, string> = {};
 
     let inCodeFence = false;
     let docTitle = fileName.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' ');
@@ -128,12 +132,15 @@ export class MarkdownParser extends BaseParser implements FileParser {
           const classification = this.classifyExcerpt(quoteText, currentHeadingPath);
 
           if (nodes.length < MAX_NODES_PER_DOCUMENT) {
+            const quoteLabel =
+              quoteText.substring(0, 60).trim() + (quoteText.length > 60 ? '...' : '') ||
+              'Blockquote';
             const quoteNode = this.createEpistemicNode(
               docId,
               fileHash,
               fileName,
               'text/markdown',
-              quoteText.substring(0, 60) + (quoteText.length > 60 ? '...' : ''),
+              quoteLabel,
               quoteText.length > 80 ? `${quoteText.substring(0, 77)}...` : quoteText,
               'proposition',
               quoteText.substring(0, MAX_NODE_TEXT_CHARS),
@@ -147,8 +154,8 @@ export class MarkdownParser extends BaseParser implements FileParser {
             );
             addNode(quoteNode);
 
-            // Attach citation to parent section
-            const parentNodeObj = nodes.find((n) => n.id === parentHeadingNode.nodeId);
+            // Attach citation to parent section in O(1)
+            const parentNodeObj = nodeMap.get(parentHeadingNode.nodeId);
             if (parentNodeObj && quoteNode.citations) {
               parentNodeObj.citations = [...quoteNode.citations, ...(parentNodeObj.citations || [])];
             }
@@ -183,7 +190,10 @@ export class MarkdownParser extends BaseParser implements FileParser {
           if (trimmedText.length >= 25) {
             if (nodes.length < MAX_NODES_PER_DOCUMENT) {
               const classification = this.classifyExcerpt(trimmedText, currentHeadingPath);
-              const label = trimmedText.split('.')[0].substring(0, 60).trim();
+              const label =
+                trimmedText.split('.')[0].substring(0, 60).trim() ||
+                trimmedText.substring(0, 60).trim() ||
+                'Proposition';
               const propNode = this.createEpistemicNode(
                 docId,
                 fileHash,
@@ -213,9 +223,9 @@ export class MarkdownParser extends BaseParser implements FileParser {
                 )
               );
             } else {
-              // Node budget reached: aggregate into parent section summary
+              // Node budget reached: aggregate into parent section summary in O(1)
               aggregatedParagraphCount++;
-              const parentNodeObj = nodes.find((n) => n.id === parentHeadingNode.nodeId);
+              const parentNodeObj = nodeMap.get(parentHeadingNode.nodeId);
               if (parentNodeObj) {
                 parentNodeObj.metadata.aggregatedParagraphs =
                   (Number(parentNodeObj.metadata.aggregatedParagraphs) || 0) + 1;
@@ -223,8 +233,8 @@ export class MarkdownParser extends BaseParser implements FileParser {
             }
           }
 
-          // Wikilink extraction with zero-length loop guards
-          const wikilinkRegex = /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
+          // Wikilink extraction with zero-length loop guards & nested-bracket protection
+          const wikilinkRegex = /\[\[([^\]|\[]+)(?:\|([^\]\[]+))?\]\]/g;
           let wMatch: RegExpExecArray | null;
           while ((wMatch = wikilinkRegex.exec(trimmedText)) !== null) {
             const target = wMatch[1].trim();
@@ -289,47 +299,9 @@ export class MarkdownParser extends BaseParser implements FileParser {
       currentBlockType = 'none';
     };
 
-    const processLine = (line: string) => {
-      lineCounter++;
+    const processBodyLine = (line: string, lineNum: number, lineStartChar: number) => {
       const trimmed = line.trim();
-      const lineStartChar = charOffsetCounter;
       const lineEndChar = lineStartChar + line.length;
-
-      // 1. Process Frontmatter (strictly at the beginning of document)
-      if (!frontmatterDone) {
-        if (lineCounter === 1 && trimmed === '---') {
-          inFrontmatter = true;
-          charOffsetCounter += line.length + 1;
-          return;
-        }
-        if (inFrontmatter) {
-          if (trimmed === '---') {
-            inFrontmatter = false;
-            frontmatterDone = true;
-            // Parse collected frontmatter lines
-            for (const fLine of frontmatterLines) {
-              const colonIdx = fLine.indexOf(':');
-              if (colonIdx > 0) {
-                const key = fLine.substring(0, colonIdx).trim();
-                const val = fLine.substring(colonIdx + 1).trim().replace(/^['"]|['"]$/g, '');
-                if (key) frontmatter[key] = val;
-              }
-            }
-            if (frontmatter.title) {
-              docTitle = frontmatter.title;
-              headingStack[0].title = docTitle;
-              currentHeadingPath[0] = docTitle;
-            }
-            charOffsetCounter += line.length + 1;
-            return;
-          }
-          frontmatterLines.push(line);
-          charOffsetCounter += line.length + 1;
-          return;
-        }
-        // First line wasn't ---, so frontmatter is not present
-        frontmatterDone = true;
-      }
 
       // Ensure root document hub is initialized once frontmatter state is settled
       if (!docHubCreated) {
@@ -343,7 +315,11 @@ export class MarkdownParser extends BaseParser implements FileParser {
           line.substring(0, 1000)
         );
         if (Object.keys(frontmatter).length > 0) {
-          Object.assign(docHub.metadata, frontmatter);
+          for (const [k, v] of Object.entries(frontmatter)) {
+            if (!DANGEROUS_KEYS.has(k)) {
+              docHub.metadata[k] = v;
+            }
+          }
           if (frontmatter.stage) docHub.systemStage = frontmatter.stage as any;
           if (frontmatter.group) docHub.thematicGroup = frontmatter.group as any;
         }
@@ -355,12 +331,10 @@ export class MarkdownParser extends BaseParser implements FileParser {
       if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
         flushBlock();
         inCodeFence = !inCodeFence;
-        charOffsetCounter += line.length + 1;
         return;
       }
 
       if (inCodeFence) {
-        charOffsetCounter += line.length + 1;
         return;
       }
 
@@ -387,8 +361,8 @@ export class MarkdownParser extends BaseParser implements FileParser {
           lineStartChar,
           lineEndChar,
           [...currentHeadingPath],
-          lineCounter,
-          lineCounter
+          lineNum,
+          lineNum
         );
 
         const classification = this.classifyExcerpt(headingTitle, currentHeadingPath);
@@ -420,7 +394,6 @@ export class MarkdownParser extends BaseParser implements FileParser {
           headingStack.push({ level, title: headingTitle, nodeId: sectionNode.id });
         }
 
-        charOffsetCounter += line.length + 1;
         return;
       }
 
@@ -430,17 +403,15 @@ export class MarkdownParser extends BaseParser implements FileParser {
           flushBlock();
           currentBlockType = 'blockquote';
           blockStartChar = lineStartChar;
-          blockStartLine = lineCounter;
+          blockStartLine = lineNum;
         }
         currentBlockLines.push(line);
-        charOffsetCounter += line.length + 1;
         return;
       }
 
       // 5. Empty line separates blocks
       if (trimmed === '') {
         flushBlock();
-        charOffsetCounter += line.length + 1;
         return;
       }
 
@@ -449,10 +420,9 @@ export class MarkdownParser extends BaseParser implements FileParser {
         flushBlock();
         currentBlockType = 'paragraph';
         blockStartChar = lineStartChar;
-        blockStartLine = lineCounter;
+        blockStartLine = lineNum;
       }
       currentBlockLines.push(line);
-      charOffsetCounter += line.length + 1;
 
       // Auto-flush long continuous paragraphs to bound memory and provide granular node coordinates
       if (currentBlockLines.length >= 25) {
@@ -460,45 +430,112 @@ export class MarkdownParser extends BaseParser implements FileParser {
       }
     };
 
-    // Execute streaming or batch iteration
+    const replayBufferedFrontmatterAsBody = () => {
+      for (const entry of frontmatterBuffer) {
+        processBodyLine(entry.line, entry.lineNum, entry.startChar);
+      }
+      frontmatterBuffer.length = 0;
+    };
+
+    const processLine = (line: string) => {
+      lineCounter++;
+      const trimmed = line.trim();
+      const lineStartChar = charOffsetCounter;
+      charOffsetCounter += line.length + 1;
+
+      // 1. Process Frontmatter (strictly at the beginning of document)
+      if (!frontmatterDone) {
+        if (lineCounter === 1 && trimmed === '---') {
+          inFrontmatter = true;
+          frontmatterBuffer.push({ line, lineNum: lineCounter, startChar: lineStartChar });
+          return;
+        }
+        if (inFrontmatter) {
+          if (trimmed === '---') {
+            inFrontmatter = false;
+            frontmatterDone = true;
+            // Skip opening '---' at index 0
+            for (let f = 1; f < frontmatterBuffer.length; f++) {
+              const fLine = frontmatterBuffer[f].line;
+              const colonIdx = fLine.indexOf(':');
+              if (colonIdx > 0) {
+                const key = fLine.substring(0, colonIdx).trim();
+                const val = fLine.substring(colonIdx + 1).trim().replace(/^['"]|['"]$/g, '');
+                if (key && !DANGEROUS_KEYS.has(key)) frontmatter[key] = val;
+              }
+            }
+            frontmatterBuffer.length = 0;
+            if (frontmatter.title) {
+              docTitle = frontmatter.title;
+              headingStack[0].title = docTitle;
+              currentHeadingPath[0] = docTitle;
+            }
+            return;
+          }
+          frontmatterBuffer.push({ line, lineNum: lineCounter, startChar: lineStartChar });
+          if (frontmatterBuffer.length > MAX_FRONTMATTER_LINES) {
+            // Unclosed frontmatter exceeded safety cap: treat as ordinary markdown body
+            inFrontmatter = false;
+            frontmatterDone = true;
+            replayBufferedFrontmatterAsBody();
+          }
+          return;
+        }
+        // First line wasn't ---, so frontmatter is not present
+        frontmatterDone = true;
+      }
+
+      processBodyLine(line, lineCounter, lineStartChar);
+    };
+
     if (isLargeFile) {
-      options?.onProgress?.('Streaming document lines (0%)...', 0);
-      let bytesProcessedSoFar = 0;
+      options?.onProgress?.('Streaming markdown (0%)...', 0);
       await streamFileLines(
         file,
         async (linesBatch, bytesRead, totalBytes) => {
-          bytesProcessedSoFar = bytesRead;
-          const pct = Math.round((bytesRead / totalBytes) * 100);
-          options?.onProgress?.(`Streaming & parsing structure (${pct}%)...`, bytesRead / totalBytes);
-
+          const pct = totalBytes > 0 ? Math.round((bytesRead / totalBytes) * 100) : 100;
+          options?.onProgress?.(`Streaming markdown (${pct}%)...`, totalBytes > 0 ? bytesRead / totalBytes : 1);
           for (const line of linesBatch) {
+            if (options?.signal?.aborted) {
+              throw new DOMException('Markdown parsing aborted', 'AbortError');
+            }
             processLine(line);
           }
           await yieldToMain();
         },
-        2 * 1024 * 1024
+        2 * 1024 * 1024,
+        options?.signal
       );
     } else {
-      options?.onProgress?.('Reading document text...', 0.05);
-      await yieldToMain();
-      const text = await file.text();
-      const lines = text.split(/\r?\n/);
-      const total = lines.length;
+      const content = await file.text();
+      const normalized = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      const lines = normalized.split('\n');
+      const totalLines = lines.length;
 
-      for (let i = 0; i < total; i++) {
+      for (let i = 0; i < totalLines; i++) {
+        if (options?.signal?.aborted) {
+          throw new DOMException('Markdown parsing aborted', 'AbortError');
+        }
         processLine(lines[i]);
-        if (i % 100 === 0 && i > 0) {
-          const pct = Math.round((i / total) * 100);
-          options?.onProgress?.(`Parsing structure (${pct}%)...`, i / total);
+        if ((i + 1) % 2500 === 0) {
+          if (options?.onProgress) {
+            const pct = Math.round(((i + 1) / totalLines) * 100);
+            options.onProgress(`Parsing markdown (${pct}%)...`, (i + 1) / totalLines);
+          }
           await yieldToMain();
         }
       }
     }
 
-    // Flush remaining trailing block
+    // If EOF reached while still inside an unclosed frontmatter block, replay buffered lines as body
+    if (inFrontmatter) {
+      inFrontmatter = false;
+      frontmatterDone = true;
+      replayBufferedFrontmatterAsBody();
+    }
+
     flushBlock();
 
-    // Ensure docHub node exists even for empty file
     if (!docHubCreated) {
       const docHub = this.createDocumentHubNode(
         docId,
@@ -506,16 +543,20 @@ export class MarkdownParser extends BaseParser implements FileParser {
         fileName,
         'text/markdown',
         docTitle,
-        `Markdown manuscript: ${docTitle}`,
+        frontmatter.description || `Empty or frontmatter-only manuscript: ${docTitle}`,
         ''
       );
+      if (Object.keys(frontmatter).length > 0) {
+        for (const [k, v] of Object.entries(frontmatter)) {
+          if (!DANGEROUS_KEYS.has(k)) {
+            docHub.metadata[k] = v;
+          }
+        }
+        if (frontmatter.stage) docHub.systemStage = frontmatter.stage as any;
+        if (frontmatter.group) docHub.thematicGroup = frontmatter.group as any;
+      }
       addNode(docHub);
-    }
-
-    // Populate connectedNodeIds efficiently
-    const nodeMap = new Map<string, GraphNode>();
-    for (const node of nodes) {
-      nodeMap.set(node.id, node);
+      docHubCreated = true;
     }
     for (const edge of edges) {
       const srcNode = nodeMap.get(edge.source);

@@ -23,6 +23,30 @@ function levelOf(node: { level?: number }): number {
   return node.level ?? 0;
 }
 
+function drawRoundRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number
+): void {
+  const safeW = Number.isFinite(w) && w > 0 ? w : 0;
+  const safeH = Number.isFinite(h) && h > 0 ? h : 0;
+  if (!Number.isFinite(x) || !Number.isFinite(y) || safeW <= 0 || safeH <= 0) return;
+  const safeR = Number.isFinite(r) ? Math.min(Math.max(0, r), safeW / 2, safeH / 2) : 0;
+  if (typeof ctx.roundRect === 'function') {
+    ctx.roundRect(x, y, safeW, safeH, safeR);
+  } else {
+    ctx.moveTo(x + safeR, y);
+    ctx.arcTo(x + safeW, y, x + safeW, y + safeH, safeR);
+    ctx.arcTo(x + safeW, y + safeH, x, y + safeH, safeR);
+    ctx.arcTo(x, y + safeH, x, y, safeR);
+    ctx.arcTo(x, y, x + safeW, y, safeR);
+    ctx.closePath();
+  }
+}
+
 interface GroundedEpistemicTopologyProps {
   canonicalTreeData?: HypermapTreeNode | null;
   stats?: HypermapStats | null;
@@ -48,9 +72,13 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
 
   useEffect(() => {
     const header = headerRef.current;
-    if (!header) return;
-    const observer = new ResizeObserver(() => setHeaderHeight(header.clientHeight));
-    observer.observe(header);
+    const container = containerRef.current;
+    if (!header && !container) return;
+    const observer = new ResizeObserver(() => {
+      if (header) setHeaderHeight(header.clientHeight);
+    });
+    if (header) observer.observe(header);
+    if (container) observer.observe(container);
     return () => observer.disconnect();
   }, []);
 
@@ -85,6 +113,15 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
   const [canonicalExpanded, setCanonicalExpanded] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [generationError, setGenerationError] = useState<string | null>(null);
+
+  const selectedNodeRef = useRef(selectedNode);
+  selectedNodeRef.current = selectedNode;
+  const showQuotesRef = useRef(showQuotes);
+  showQuotesRef.current = showQuotes;
+  const viewSourceModeRef = useRef(viewSourceMode);
+  viewSourceModeRef.current = viewSourceMode;
+  const torusOpacityRef = useRef(torusOpacity);
+  torusOpacityRef.current = torusOpacity;
 
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -759,6 +796,18 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
     return allCollapsed && !qLower ? positioned.filter(node => levelOf(node) <= 1) : positioned;
   }, [treeData, viewSourceMode, canonicalTreeData, searchQuery, allCollapsed, canonicalExpanded]);
 
+  const layoutTreeRef = useRef<PositionedNode[]>(layoutTree);
+  layoutTreeRef.current = layoutTree;
+  const layoutNodeById = useMemo(() => {
+    const map = new Map<string, PositionedNode>();
+    for (const node of layoutTree) {
+      map.set(node.id, node);
+    }
+    return map;
+  }, [layoutTree]);
+  const layoutNodeByIdRef = useRef<Map<string, PositionedNode>>(layoutNodeById);
+  layoutNodeByIdRef.current = layoutNodeById;
+
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (e.button !== 0) return;
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -796,10 +845,16 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
     const mouseY = e.clientY - rect.top;
 
     setViewport((prev) => {
-      const newScale = Math.min(Math.max(prev.scale * zoomFactor, 0.2), 3.2);
-      const newX = mouseX - (mouseX - prev.x) * (newScale / prev.scale);
-      const newY = mouseY - (mouseY - prev.y) * (newScale / prev.scale);
-      return { x: newX, y: newY, scale: newScale };
+      const safePrevScale = Number.isFinite(prev.scale) && prev.scale > 0 ? prev.scale : 0.82;
+      const newScale = Math.min(Math.max(safePrevScale * zoomFactor, 0.2), 3.2);
+      const ratio = newScale / safePrevScale;
+      const newX = mouseX - (mouseX - prev.x) * ratio;
+      const newY = mouseY - (mouseY - prev.y) * ratio;
+      return {
+        x: Number.isFinite(newX) ? newX : prev.x,
+        y: Number.isFinite(newY) ? newY : prev.y,
+        scale: newScale
+      };
     });
   }, []);
 
@@ -817,9 +872,11 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
 
     const canvasX = e.clientX - rect.left;
     const canvasY = e.clientY - rect.top;
+    const vp = viewportRef.current;
+    const safeScale = Number.isFinite(vp.scale) && vp.scale > 0 ? vp.scale : 0.82;
 
-    const worldX = (canvasX - viewport.x) / viewport.scale;
-    const worldY = (canvasY - viewport.y) / viewport.scale;
+    const worldX = (canvasX - vp.x) / safeScale;
+    const worldY = (canvasY - vp.y) / safeScale;
 
     let found: PositionedNode | null = null;
     for (const node of layoutTree) {
@@ -878,17 +935,23 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
   const handleResetView = () => {
     const canvas = canvasRef.current;
     if (!canvas || !layoutTree.length) return;
-    const minX = Math.min(...layoutTree.map(n => n.x)) - 40;
-    const maxX = Math.max(...layoutTree.map(n => n.x)) + 180;
-    const minY = Math.min(...layoutTree.map(n => n.y)) - 40;
-    const maxY = Math.max(...layoutTree.map(n => n.y)) + 40;
+    if (canvas.clientWidth <= 0 || canvas.clientHeight <= 0) return;
+    const valid = layoutTree.filter((n) => Number.isFinite(n.x) && Number.isFinite(n.y));
+    if (!valid.length) return;
+    const minX = Math.min(...valid.map((n) => n.x)) - 40;
+    const maxX = Math.max(...valid.map((n) => n.x)) + 180;
+    const minY = Math.min(...valid.map((n) => n.y)) - 40;
+    const maxY = Math.max(...valid.map((n) => n.y)) + 40;
+    const spanX = Math.max(120, maxX - minX);
+    const spanY = Math.max(120, maxY - minY);
     const toolbarSpace = canvas.clientWidth < 1280 ? 160 : 48;
     const availableHeight = Math.max(160, canvas.clientHeight - headerHeight - toolbarSpace - 96);
-    const scale = Math.max(0.15, Math.min(0.85, (canvas.clientWidth - 64) / (maxX - minX), availableHeight / (maxY - minY)));
+    const scale = Math.max(0.15, Math.min(0.85, (canvas.clientWidth - 64) / spanX, availableHeight / spanY));
+    if (!Number.isFinite(scale) || scale <= 0) return;
     setViewport({ x: canvas.clientWidth / 2 - (minX + maxX) / 2 * scale, y: headerHeight + toolbarSpace + 32 + availableHeight / 2 - (minY + maxY) / 2 * scale, scale });
   };
 
-  useEffect(() => { handleResetView(); }, [viewSourceMode, headerHeight]);
+  useEffect(() => { handleResetView(); }, [viewSourceMode, headerHeight, canonicalTreeData]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -909,8 +972,19 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
       lastFrame = now;
       const t = timeRef.current;
 
+      const activeTree = layoutTreeRef.current;
+      const nodeById = layoutNodeByIdRef.current;
+      const activeSelectedNode = selectedNodeRef.current;
+      const activeShowQuotes = showQuotesRef.current;
+      const activeTorusOpacity = torusOpacityRef.current;
+      const activeViewMode = viewSourceModeRef.current;
+
       const width = canvas.clientWidth;
       const height = canvas.clientHeight;
+      if (width <= 0 || height <= 0) {
+        animFrameIdRef.current = requestAnimationFrame(render);
+        return;
+      }
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const pixelWidth = Math.round(width * dpr), pixelHeight = Math.round(height * dpr);
       if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
@@ -923,10 +997,10 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
       const bgGrad = ctx.createRadialGradient(
         width / 2,
         height / 2,
-        100,
+        Math.min(100, Math.min(width, height) * 0.25),
         width / 2,
         height / 2,
-        Math.max(width, height) * 0.85
+        Math.max(width, height, 100) * 0.85
       );
       bgGrad.addColorStop(0, '#040714');
       bgGrad.addColorStop(0.5, '#02040b');
@@ -934,7 +1008,10 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
       ctx.fillStyle = bgGrad;
       ctx.fillRect(0, 0, width, height);
 
-      const { x: vx, y: vy, scale: s } = viewportRef.current;
+      const { x: rawVx, y: rawVy, scale: rawS } = viewportRef.current;
+      const s = Number.isFinite(rawS) && rawS > 0 ? rawS : 0.82;
+      const vx = Number.isFinite(rawVx) ? rawVx : 180;
+      const vy = Number.isFinite(rawVy) ? rawVy : 360;
 
       // 2. Swirling Nebula Clouds
       ctx.save();
@@ -961,7 +1038,7 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
       });
 
       // 3. Faint 3D Torus / Vortex Wireframe Geometry
-      if (torusOpacity > 0.05) {
+      if (activeTorusOpacity > 0.05) {
         ctx.save();
         ctx.lineWidth = 1;
         const R = 320;
@@ -972,7 +1049,7 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
         const uSteps = 16;
         const vSteps = 24;
 
-        ctx.strokeStyle = `rgba(56, 189, 248, ${0.09 * torusOpacity})`;
+        ctx.strokeStyle = `rgba(56, 189, 248, ${0.09 * activeTorusOpacity})`;
 
         for (let i = 0; i < uSteps; i++) {
           const u = (i / uSteps) * Math.PI * 2;
@@ -999,7 +1076,7 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
           ctx.stroke();
         }
 
-        ctx.strokeStyle = `rgba(168, 85, 247, ${0.07 * torusOpacity})`;
+        ctx.strokeStyle = `rgba(168, 85, 247, ${0.07 * activeTorusOpacity})`;
         for (let j = 0; j < vSteps; j += 2) {
           const v = (j / vSteps) * Math.PI * 2;
           ctx.beginPath();
@@ -1039,14 +1116,14 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
       });
       ctx.globalAlpha = 1;
 
-      // 5. Sweeping Cosmic River Bridges (as in image.png)
-      if (viewSourceMode === 'markmap') {
-        const themeNode = layoutTree.find((n) => n.id === 'mm_theme');
-        const figureNode = layoutTree.find((n) => n.id === 'mm_figure');
-        const existThemesNode = layoutTree.find((n) => n.id === 'mm_existential_themes_nexus');
-        const thinkersNode = layoutTree.find((n) => n.id === 'mm_thinkers_under_themes');
-        const origStructNode = layoutTree.find((n) => n.id === 'mm_original_structure');
-        const westNihilNode = layoutTree.find((n) => n.id === 'mm_nihilism_sub1');
+      // 5. Sweeping Cosmic River Bridges
+      if (activeViewMode === 'markmap') {
+        const themeNode = nodeById.get('mm_theme');
+        const figureNode = nodeById.get('mm_figure');
+        const existThemesNode = nodeById.get('mm_existential_themes_nexus');
+        const thinkersNode = nodeById.get('mm_thinkers_under_themes');
+        const origStructNode = nodeById.get('mm_original_structure');
+        const westNihilNode = nodeById.get('mm_nihilism_sub1');
 
         const drawSweepingRiver = (
           x1: number,
@@ -1109,7 +1186,7 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
             const py =
               Math.pow(1 - u, 3) * y1 +
               3 * Math.pow(1 - u, 2) * u * cy1 +
-              3 * (1 - u) * Math.pow(u, 2) * cx2 +
+              3 * (1 - u) * Math.pow(u, 2) * cy2 +
               Math.pow(u, 3) * y2;
 
             ctx.shadowColor = '#00f0ff';
@@ -1145,11 +1222,11 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
       }
 
       // 6. Luminous Connecting Lines
-      layoutTree.forEach((node) => {
+      activeTree.forEach((node) => {
         if (!node.parent) return;
 
         const p = node.parent;
-        const isSelectedBranch = selectedNode && (selectedNode.id === node.id || selectedNode.id === p.id);
+        const isSelectedBranch = activeSelectedNode && (activeSelectedNode.id === node.id || activeSelectedNode.id === p.id);
         const isMajorTrunk = levelOf(node) <= 2;
 
         const dx = node.x - p.x;
@@ -1198,7 +1275,7 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
         const py =
           Math.pow(1 - u, 3) * p.y +
           3 * Math.pow(1 - u, 2) * u * cy1 +
-          3 * (1 - u) * Math.pow(u, 2) * cx2 +
+          3 * (1 - u) * Math.pow(u, 2) * cy2 +
           Math.pow(u, 3) * node.y;
 
         ctx.save();
@@ -1212,15 +1289,15 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
       });
 
       // 7. Render Luminous Data Clusters
-      layoutTree.forEach((node) => {
+      activeTree.forEach((node) => {
         const isRoot = node.type === 'root';
         const isMajorHub = node.type === 'major_hub';
-        const isSelected = selectedNode?.id === node.id;
+        const isSelected = activeSelectedNode?.id === node.id;
         const isMatch = node.isMatch;
         const r = node.radius || 10;
 
         // Draw Root Capsule Node on Canvas with high fidelity
-        if (isRoot && viewSourceMode === 'markmap') {
+        if (isRoot && activeViewMode === 'markmap') {
           ctx.save();
           ctx.translate(node.x, node.y);
 
@@ -1236,7 +1313,7 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
           ctx.lineWidth = 1.5;
 
           ctx.beginPath();
-          ctx.roundRect(pillX, pillY, capsuleWidth, capsuleHeight, 16);
+          drawRoundRect(ctx, pillX, pillY, capsuleWidth, capsuleHeight, 16);
           ctx.fill();
           ctx.stroke();
 
@@ -1275,10 +1352,11 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
         // Stardust Galaxy Particle Cloud
         const pCount = node.particleCount || (isMajorHub ? 45 : 20);
         const auraRadius = r * (isMajorHub ? 3.2 : 2.2);
+        const auraSpan = Math.max(1, Math.floor(auraRadius - r));
 
         for (let i = 0; i < pCount; i++) {
           const pAngle = (i / pCount) * Math.PI * 2 + t * 0.35 * (i % 2 === 0 ? 1 : -0.7);
-          const pDist = r * 1.1 + ((i * 23) % Math.floor(auraRadius - r));
+          const pDist = r * 1.1 + ((i * 23) % auraSpan);
           const ppx = Math.cos(pAngle) * pDist;
           const ppy = Math.sin(pAngle) * pDist;
           const pAlpha = 0.3 + 0.5 * Math.sin(t * 1.8 + i);
@@ -1387,10 +1465,10 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
       });
 
       // 7. Distinct Floating Quotes & Critiques Blocks
-      if (showQuotes) {
+      if (activeShowQuotes) {
         ctx.save();
         FAMOUS_PHILOSOPHICAL_QUOTES.forEach((pq) => {
-          const targetNode = layoutTree.find((n) => n.id === pq.relationNodeId);
+          const targetNode = nodeById.get(pq.relationNodeId);
           if (!targetNode) return;
 
           const qx = targetNode.x + 24;
@@ -1410,7 +1488,7 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
           const quoteWidth = 180;
           const quoteHeight = 36;
           ctx.beginPath();
-          ctx.roundRect(qx, qy, quoteWidth, quoteHeight, 6);
+          drawRoundRect(ctx, qx, qy, quoteWidth, quoteHeight, 6);
           ctx.fill();
           ctx.stroke();
 
@@ -1439,14 +1517,14 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
         cancelAnimationFrame(animFrameIdRef.current);
       }
     };
-  }, [layoutTree, showQuotes, torusOpacity, selectedNode]);
+  }, []);
 
   return (
     <div
       ref={containerRef}
       style={{ '--header-bottom': `${headerHeight + 32}px` } as React.CSSProperties}
-      className={`relative w-full h-full min-h-screen overflow-hidden select-none font-sans bg-black ${
-        isFullscreen ? 'fixed inset-0 z-50' : 'w-screen h-screen'
+      className={`relative overflow-hidden select-none font-sans bg-black ${
+        isFullscreen ? 'fixed inset-0 z-50 w-screen h-screen' : 'w-full h-[760px] rounded-xl border border-zinc-800'
       }`}
     >
       {/* 1. Canvas Viewport */}
@@ -1461,7 +1539,12 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
         tabIndex={0}
         aria-label="Interactive topology graph. Enter inspects the root, arrow keys pan, plus and minus zoom, Home resets, Escape closes the inspector."
         onKeyDown={(event) => {
-          if (event.key === 'Enter') { setSelectedNode(layoutTree[0]); setDrawerOpen(true); }
+          if (event.key === 'Enter') {
+            if (layoutTree.length > 0) {
+              setSelectedNode(layoutTree[0]);
+              setDrawerOpen(true);
+            }
+          }
           else if (event.key === 'Escape') setDrawerOpen(false);
           else if (event.key === 'Home') { event.preventDefault(); handleResetView(); }
           else if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
@@ -1555,8 +1638,26 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
       {/* 3. Floating Root Capsule Node */}
       <button type="button"
         onClick={() => {
-          setSelectedNode(MARKMAP_EPITEMIC_TOPOLOGY);
-          setDrawerOpen(true);
+          if (viewSourceMode === 'canonical_cosmos' && canonicalTreeData) {
+            const rootNode = layoutTreeRef.current[0] ?? {
+              id: canonicalTreeData.id,
+              title: canonicalTreeData.title,
+              level: 0,
+              type: 'root' as const,
+              radius: 20,
+              particleCount: 32,
+              color: '#00f0ff',
+              quoteText: canonicalTreeData.payload_text,
+              warrant: canonicalTreeData.warrant_category as any,
+              epistemicStatus: canonicalTreeData.epistemic_status
+            };
+            setSelectedNode(rootNode);
+            setDrawerOpen(true);
+            if (onSelectCanonicalNode) onSelectCanonicalNode(canonicalTreeData);
+          } else {
+            setSelectedNode(MARKMAP_EPITEMIC_TOPOLOGY);
+            setDrawerOpen(true);
+          }
         }}
         className="absolute top-[var(--header-bottom)] left-6 max-w-[calc(100%-3rem)] z-20 px-3.5 py-1.5 rounded-full border backdrop-blur-md cursor-pointer transition-all duration-200 hover:scale-105 flex items-center gap-2 group"
         style={{
@@ -1567,7 +1668,9 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
       >
         <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping"></span>
         <span className="truncate text-xs font-mono font-bold text-cyan-200 tracking-wide group-hover:text-white">
-          [-] JOURNAL314 Ω — Nihiltheistic Hypermarkmap
+          {viewSourceMode === 'canonical_cosmos' && canonicalTreeData
+            ? `[-] ${canonicalTreeData.title}`
+            : '[-] JOURNAL314 Ω — Nihiltheistic Hypermarkmap'}
         </span>
       </button>
 
@@ -1651,7 +1754,7 @@ export const GroundedEpistemicTopology: React.FC<GroundedEpistemicTopologyProps>
 
         <button
           onClick={async () => {
-            if (document.fullscreenElement) await document.exitFullscreen();
+            if (document.fullscreenElement) await document.exitFullscreen().catch(() => setIsFullscreen(false));
             else await containerRef.current?.requestFullscreen().catch(() => setIsFullscreen(true));
           }}
           className="p-2 rounded-lg bg-zinc-950/80 text-purple-300 border border-purple-500/50 hover:border-purple-400 backdrop-blur-md"

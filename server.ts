@@ -15,6 +15,15 @@ function apiError(res: Response, error: unknown) {
   if (error instanceof InputError) return res.status(error.status).json({ error: error.message });
   return res.status(500).json({ error: 'The operation failed. Please check the request and try again.' });
 }
+
+function safeJsonParse<T>(raw: unknown, fallback: T): T {
+  if (typeof raw !== 'string' || !raw.trim()) return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
 import path from 'node:path';
 import { getDb, closeDb } from './server/db';
 import { seedDatabase } from './server/seedData';
@@ -219,7 +228,7 @@ async function startServer() {
       const sources = db.prepare('SELECT * FROM sources ORDER BY import_timestamp DESC').all();
       res.json(sources.map((s: any) => ({
         ...s,
-        extraction_warnings: JSON.parse(s.extraction_warnings || '[]')
+        extraction_warnings: safeJsonParse<string[]>(s.extraction_warnings, [])
       })));
     } catch (err: any) {
       apiError(res, err);
@@ -282,8 +291,8 @@ async function startServer() {
       const concepts = db.prepare('SELECT * FROM concepts ORDER BY canonical_term ASC').all();
       res.json(concepts.map((c: any) => ({
         ...c,
-        senses: JSON.parse(c.senses || '[]'),
-        tags: JSON.parse(c.tags || '[]')
+        senses: safeJsonParse<string[]>(c.senses, []),
+        tags: safeJsonParse<string[]>(c.tags, [])
       })));
     } catch (err: any) {
       apiError(res, err);
@@ -293,6 +302,9 @@ async function startServer() {
   app.post('/api/concepts', (req: Request, res: Response) => {
     try {
       const { name, canonical_term, definition, senses, thesis, limit_condition, status, tags } = req.body;
+      if (typeof name !== 'string' || !name.trim() || typeof canonical_term !== 'string' || !canonical_term.trim() || typeof definition !== 'string' || !definition.trim()) {
+        return res.status(400).json({ error: 'name, canonical_term, and definition are required.' });
+      }
       const id = 'c_' + (canonical_term || name || '').toLowerCase().replace(/[^\w]/g, '_').slice(0, 20) + '_' + Date.now().toString().slice(-4);
       const now = new Date().toISOString();
 
@@ -303,9 +315,9 @@ async function startServer() {
       insert.run(
         id,
         'proj_journal314_canonical',
-        name,
-        canonical_term,
-        definition,
+        name.trim(),
+        canonical_term.trim(),
+        definition.trim(),
         JSON.stringify(senses || []),
         thesis || null,
         limit_condition || null,
@@ -327,9 +339,9 @@ async function startServer() {
       const claims = db.prepare('SELECT * FROM claims ORDER BY created_at DESC').all();
       res.json(claims.map((cl: any) => ({
         ...cl,
-        source_attributions: JSON.parse(cl.source_attributions || '[]'),
-        premise_claim_ids: JSON.parse(cl.premise_claim_ids || '[]'),
-        objection_ids: JSON.parse(cl.objection_ids || '[]')
+        source_attributions: safeJsonParse<any[]>(cl.source_attributions, []),
+        premise_claim_ids: safeJsonParse<string[]>(cl.premise_claim_ids, []),
+        objection_ids: safeJsonParse<string[]>(cl.objection_ids, [])
       })));
     } catch (err: any) {
       apiError(res, err);
@@ -350,6 +362,12 @@ async function startServer() {
         objection_ids
       } = req.body;
 
+      if (typeof text !== 'string' || !text.trim()) {
+        return res.status(400).json({ error: 'text is required to create a claim.' });
+      }
+      const resolvedWarrant = warrant_category || 'W1';
+      const resolvedSupport = resolvedWarrant === 'W5' ? 'disputed' : (support_status || 'supported');
+
       const id = 'clm_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
       const now = new Date().toISOString();
 
@@ -361,14 +379,14 @@ async function startServer() {
       insert.run(
         id,
         'proj_journal314_canonical',
-        text,
+        text.trim(),
         claim_type || 'phenomenological_description',
         fidelity_label || 'STATED',
         JSON.stringify(source_attributions || []),
         JSON.stringify(premise_claim_ids || []),
         concise_inference_summary || null,
-        warrant_category || 'W1',
-        support_status || 'supported',
+        resolvedWarrant,
+        resolvedSupport,
         JSON.stringify(objection_ids || []),
         'current',
         now,
@@ -394,6 +412,14 @@ async function startServer() {
   app.post('/api/objections', (req: Request, res: Response) => {
     try {
       const { claim_id, title, counter_argument, rival_model, severity, status, reply } = req.body;
+      if (
+        typeof claim_id !== 'string' || !claim_id.trim() ||
+        typeof title !== 'string' || !title.trim() ||
+        typeof counter_argument !== 'string' || !counter_argument.trim() ||
+        typeof rival_model !== 'string' || !rival_model.trim()
+      ) {
+        return res.status(400).json({ error: 'claim_id, title, counter_argument, and rival_model are required.' });
+      }
       const id = 'obj_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
       const now = new Date().toISOString();
 
@@ -404,10 +430,10 @@ async function startServer() {
       insert.run(
         id,
         'proj_journal314_canonical',
-        claim_id,
-        title,
-        counter_argument,
-        rival_model,
+        claim_id.trim(),
+        title.trim(),
+        counter_argument.trim(),
+        rival_model.trim(),
         severity || 'serious',
         status || 'addressed',
         reply || null,
@@ -500,8 +526,8 @@ async function startServer() {
       const chapters = db.prepare('SELECT * FROM manuscript_sections ORDER BY chapter_number ASC').all();
       res.json(chapters.map((ch: any) => ({
         ...ch,
-        cross_references: JSON.parse(ch.cross_references || '[]'),
-        open_questions: JSON.parse(ch.open_questions || '[]')
+        cross_references: safeJsonParse<any[]>(ch.cross_references, []),
+        open_questions: safeJsonParse<any[]>(ch.open_questions, [])
       })));
     } catch (err: any) {
       apiError(res, err);
@@ -514,8 +540,8 @@ async function startServer() {
       if (!chapter) return res.status(404).json({ error: 'Chapter not found' });
       res.json({
         ...chapter,
-        cross_references: JSON.parse(chapter.cross_references || '[]'),
-        open_questions: JSON.parse(chapter.open_questions || '[]')
+        cross_references: safeJsonParse<any[]>(chapter.cross_references, []),
+        open_questions: safeJsonParse<any[]>(chapter.open_questions, [])
       });
     } catch (err: any) {
       apiError(res, err);
@@ -538,7 +564,7 @@ async function startServer() {
       const jobs = db.prepare('SELECT * FROM research_jobs ORDER BY created_at DESC').all();
       res.json(jobs.map((j: any) => ({
         ...j,
-        target_nodes: JSON.parse(j.target_nodes || '[]')
+        target_nodes: safeJsonParse<string[]>(j.target_nodes, [])
       })));
     } catch (err: any) {
       apiError(res, err);
@@ -553,10 +579,10 @@ async function startServer() {
       const events = db.prepare('SELECT * FROM job_events WHERE job_id = ? ORDER BY timestamp ASC').all(jobId);
       res.json({
         ...job,
-        target_nodes: JSON.parse(job.target_nodes || '[]'),
+        target_nodes: safeJsonParse<string[]>(job.target_nodes, []),
         events: events.map((e: any) => ({
           ...e,
-          payload: e.payload ? JSON.parse(e.payload) : null
+          payload: e.payload ? safeJsonParse<unknown>(e.payload, null) : null
         }))
       });
     } catch (err: any) {
@@ -591,9 +617,9 @@ async function startServer() {
       res.json({
         job: {
           ...updatedJob,
-          target_nodes: typeof updatedJob.target_nodes === 'string' ? JSON.parse(updatedJob.target_nodes || '[]') : updatedJob.target_nodes,
+          target_nodes: typeof updatedJob.target_nodes === 'string' ? safeJsonParse<string[]>(updatedJob.target_nodes, []) : updatedJob.target_nodes,
           cycles_completed: updatedJob.current_cycle,
-          total_tokens: JSON.parse(updatedJob.checkpoint_data || '{}').totalTokens || 0,
+          total_tokens: safeJsonParse<{ totalTokens?: number }>(updatedJob.checkpoint_data, {}).totalTokens || 0,
           summary: `Bounded Cycle ${updatedJob.current_cycle}/${updatedJob.max_cycles} completed with PEC-Ω warrant validation.`
         },
         newClaimsCount: Math.max(0, finalClaims - initialClaims),
@@ -627,10 +653,10 @@ async function startServer() {
       const events = db.prepare('SELECT * FROM job_events WHERE job_id = ? ORDER BY timestamp ASC').all(jobId);
       res.json({
         ...job,
-        target_nodes: JSON.parse(job.target_nodes || '[]'),
+        target_nodes: safeJsonParse<string[]>(job.target_nodes, []),
         events: events.map((e: any) => ({
           ...e,
-          payload: e.payload ? JSON.parse(e.payload) : null
+          payload: e.payload ? safeJsonParse<unknown>(e.payload, null) : null
         }))
       });
     } catch (err: any) {

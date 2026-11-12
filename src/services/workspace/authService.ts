@@ -53,6 +53,16 @@ provider.setCustomParameters({
 let isSigningIn = false;
 // Cached access token in memory (never in localStorage per security requirements)
 let cachedAccessToken: string | null = null;
+let cachedTokenExpiresAt = 0;
+const TOKEN_TTL_MS = 55 * 60 * 1000; // 55 minutes (Google OAuth access tokens expire at 60 min)
+
+function getActiveToken(): string | null {
+  if (cachedAccessToken && Date.now() >= cachedTokenExpiresAt) {
+    cachedAccessToken = null;
+    cachedTokenExpiresAt = 0;
+  }
+  return cachedAccessToken;
+}
 
 // Auth state listeners
 type AuthCallback = (user: User | null, token: string | null) => void;
@@ -60,7 +70,7 @@ const listeners = new Set<AuthCallback>();
 
 export const subscribeAuthState = (callback: AuthCallback): (() => void) => {
   listeners.add(callback);
-  callback(auth.currentUser, cachedAccessToken);
+  callback(auth.currentUser, getActiveToken());
   return () => {
     listeners.delete(callback);
   };
@@ -85,9 +95,10 @@ export const initAuth = (
 ): (() => void) => {
   return onAuthStateChanged(auth, async (user: User | null) => {
     if (user) {
-      if (cachedAccessToken) {
-        if (onAuthSuccess) onAuthSuccess(user, cachedAccessToken);
-        notifyListeners(user, cachedAccessToken);
+      const token = getActiveToken();
+      if (token) {
+        if (onAuthSuccess) onAuthSuccess(user, token);
+        notifyListeners(user, token);
       } else if (!isSigningIn) {
         // User is known to firebase but we need a valid OAuth access token for Google Workspace APIs
         notifyListeners(user, null);
@@ -95,6 +106,7 @@ export const initAuth = (
       }
     } else {
       cachedAccessToken = null;
+      cachedTokenExpiresAt = 0;
       notifyListeners(null, null);
       if (onAuthFailure) onAuthFailure();
     }
@@ -114,6 +126,7 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
     }
 
     cachedAccessToken = credential.accessToken;
+    cachedTokenExpiresAt = Date.now() + TOKEN_TTL_MS;
     notifyListeners(result.user, cachedAccessToken);
     return { user: result.user, accessToken: cachedAccessToken };
   } catch (error: unknown) {
@@ -125,10 +138,14 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
 };
 
 /**
- * Returns the in-memory cached OAuth access token.
+ * Returns the in-memory cached OAuth access token if non-expired.
  */
 export const getAccessToken = async (): Promise<string | null> => {
-  return cachedAccessToken;
+  const token = getActiveToken();
+  if (!token && auth.currentUser) {
+    notifyListeners(auth.currentUser, null);
+  }
+  return token;
 };
 
 /**
@@ -145,6 +162,7 @@ export const logout = async (): Promise<void> => {
   try {
     await signOut(auth);
     cachedAccessToken = null;
+    cachedTokenExpiresAt = 0;
     notifyListeners(null, null);
   } catch (err) {
     console.error('[authService] Logout error:', err);

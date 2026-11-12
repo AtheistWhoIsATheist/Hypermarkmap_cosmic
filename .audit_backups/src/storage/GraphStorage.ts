@@ -1,0 +1,686 @@
+/**
+ * Transactional Storage Engine (src/storage/GraphStorage.ts)
+ * Atomic IndexedDB persistence with synchronous hydrated in-memory cache,
+ * non-blocking timeout safety guards (2s IDB timeout with in-memory fallback),
+ * chunked 500-item transactions, 32KB document text truncation guards,
+ * pre-commit relational integrity checks, and SHA-256 fingerprint deduplication.
+ */
+
+import type {
+  GraphNode,
+  GraphEdge,
+  SourceDocument,
+  SourceSpan,
+  GraphPersistenceSnapshot
+} from '../types/graph';
+import {
+  MARKMAP_EPITEMIC_TOPOLOGY,
+  type EpistemicTopologyNode
+} from '../components/GroundedEpistemicTopologyData';
+
+const DB_NAME = 'nihiltheism_graph_storage';
+const DB_VERSION = 1;
+const MAX_DOCUMENT_TEXT_PREVIEW = 32768; // 32 KB maximum preview string length
+const TRANSACTION_BATCH_SIZE = 500; // 500 items per IndexedDB transaction to prevent IPC buffer starvation
+const IDB_SAFETY_TIMEOUT_MS = 2500; // 2.5s timeout for IDB operations before graceful in-memory fallback
+
+function sanitizeDocumentRecord(doc?: SourceDocument): SourceDocument | undefined {
+  if (!doc) return undefined;
+  const sanitized: SourceDocument = { ...doc };
+  if (sanitized.summary && sanitized.summary.length > MAX_DOCUMENT_TEXT_PREVIEW) {
+    sanitized.summary = sanitized.summary.slice(0, MAX_DOCUMENT_TEXT_PREVIEW) + '... [TRUNCATED 32KB]';
+  }
+  const dynamicDoc = sanitized as unknown as Record<string, unknown>;
+  if (typeof dynamicDoc.content === 'string' && dynamicDoc.content.length > MAX_DOCUMENT_TEXT_PREVIEW) {
+    dynamicDoc.content = dynamicDoc.content.slice(0, MAX_DOCUMENT_TEXT_PREVIEW) + '... [TRUNCATED 32KB]';
+  }
+  if (typeof dynamicDoc.rawText === 'string' && dynamicDoc.rawText.length > MAX_DOCUMENT_TEXT_PREVIEW) {
+    dynamicDoc.rawText = dynamicDoc.rawText.slice(0, MAX_DOCUMENT_TEXT_PREVIEW) + '... [TRUNCATED 32KB]';
+  }
+  return sanitized;
+}
+
+function sanitizeNode(node: GraphNode): GraphNode {
+  if (node.content && node.content.length > MAX_DOCUMENT_TEXT_PREVIEW) {
+    return {
+      ...node,
+      content: node.content.slice(0, MAX_DOCUMENT_TEXT_PREVIEW) + '... [TRUNCATED 32KB]'
+    };
+  }
+  return node;
+}
+
+export const BASELINE_ID_ALIASES: Record<string, string> = {
+  mm_apophatic_theology: 'mm_existential_themes_nexus',
+  mm_phenomenological_bracketting: 'mm_existentialism_cluster',
+  mm_phenomenological_bracketing: 'mm_existentialism_cluster',
+  mm_nihilism: 'mm_nihilism_main_branch',
+  mm_existentialism: 'mm_existentialism_cluster'
+};
+
+function extractAllBaselineIds(root: EpistemicTopologyNode): Set<string> {
+  const ids = new Set<string>();
+  function walk(node: EpistemicTopologyNode) {
+    if (node.id) ids.add(node.id);
+    if (node.children) node.children.forEach(walk);
+  }
+  walk(root);
+  // Also register recognized aliases so they are validated and remapped
+  Object.keys(BASELINE_ID_ALIASES).forEach((alias) => ids.add(alias));
+  return ids;
+}
+
+class GraphStorageEngine {
+  private dbPromise: Promise<IDBDatabase | null> | null = null;
+  // Synchronous in-memory hydrated cache for 60fps React renders
+  private cachedNodes = new Map<string, GraphNode>();
+  private cachedEdges = new Map<string, GraphEdge>();
+  private cachedDocuments = new Map<string, SourceDocument>();
+  private cachedSpans = new Map<string, SourceSpan>();
+  private cachedHashes = new Set<string>();
+  private isHydrated = false;
+  private hydrationPromise: Promise<void> | null = null;
+  private allBaselineIds: Set<string>;
+
+  constructor() {
+    this.allBaselineIds = extractAllBaselineIds(MARKMAP_EPITEMIC_TOPOLOGY);
+    if (typeof window !== 'undefined') {
+      this.hydrationPromise = this.hydrateCache();
+    }
+  }
+
+  /**
+   * Opens or returns the active IndexedDB connection with defensive timeout guards
+   */
+  private async getDb(): Promise<IDBDatabase | null> {
+    if (typeof window === 'undefined' || !window.indexedDB) {
+      return null;
+    }
+    if (this.dbPromise) return this.dbPromise;
+
+    this.dbPromise = new Promise((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          console.warn('[GraphStorage] IndexedDB open timed out after 2500ms. Falling back to in-memory store.');
+          resolve(null);
+        }
+      }, IDB_SAFETY_TIMEOUT_MS);
+
+      try {
+        const request = window.indexedDB.open(DB_NAME, DB_VERSION);
+
+        request.onblocked = () => {
+          console.warn('[GraphStorage] IndexedDB open blocked. Falling back to in-memory store.');
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            resolve(null);
+          }
+        };
+
+        request.onupgradeneeded = (event) => {
+          const db = (event.target as IDBOpenDBRequest).result;
+
+          if (!db.objectStoreNames.contains('documents')) {
+            db.createObjectStore('documents', { keyPath: 'id' });
+          }
+          if (!db.objectStoreNames.contains('nodes')) {
+            db.createObjectStore('nodes', { keyPath: 'id' });
+          }
+          if (!db.objectStoreNames.contains('edges')) {
+            db.createObjectStore('edges', { keyPath: 'id' });
+          }
+          if (!db.objectStoreNames.contains('source_spans')) {
+            db.createObjectStore('source_spans', { keyPath: 'spanId' });
+          }
+          if (!db.objectStoreNames.contains('file_hashes')) {
+            db.createObjectStore('file_hashes', { keyPath: 'hash' });
+          }
+        };
+
+        request.onsuccess = () => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            resolve(request.result);
+          }
+        };
+
+        request.onerror = () => {
+          console.warn('[GraphStorage] IndexedDB open error, falling back to in-memory store.');
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            resolve(null);
+          }
+        };
+      } catch (err) {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          console.warn('[GraphStorage] IndexedDB unavailable:', err);
+          resolve(null);
+        }
+      }
+    });
+
+    return this.dbPromise;
+  }
+
+  /**
+   * Hydrates in-memory cache from IndexedDB on startup with safety timeout
+   */
+  public async hydrateCache(): Promise<void> {
+    const db = await this.getDb();
+    if (!db) {
+      this.isHydrated = true;
+      return;
+    }
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          this.isHydrated = true;
+          resolve();
+        }
+      }, IDB_SAFETY_TIMEOUT_MS);
+
+      try {
+        const tx = db.transaction(['documents', 'nodes', 'edges', 'source_spans', 'file_hashes'], 'readonly');
+
+        tx.onerror = () => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            this.isHydrated = true;
+            resolve();
+          }
+        };
+
+        tx.onabort = () => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            this.isHydrated = true;
+            resolve();
+          }
+        };
+
+        tx.objectStore('documents').getAll().onsuccess = (e) => {
+          const docs = (e.target as IDBRequest<SourceDocument[]>).result || [];
+          docs.forEach(d => this.cachedDocuments.set(d.id, d));
+        };
+
+        tx.objectStore('nodes').getAll().onsuccess = (e) => {
+          const nodes = (e.target as IDBRequest<GraphNode[]>).result || [];
+          nodes.forEach(n => this.cachedNodes.set(n.id, n));
+        };
+
+        tx.objectStore('edges').getAll().onsuccess = (e) => {
+          const edges = (e.target as IDBRequest<GraphEdge[]>).result || [];
+          edges.forEach((ed) => {
+            const targetId = BASELINE_ID_ALIASES[ed.target] || ed.target;
+            const sourceId = BASELINE_ID_ALIASES[ed.source] || ed.source;
+            const normalizedEd =
+              targetId !== ed.target || sourceId !== ed.source
+                ? { ...ed, source: sourceId, target: targetId }
+                : ed;
+            this.cachedEdges.set(normalizedEd.id, normalizedEd);
+          });
+        };
+
+        tx.objectStore('source_spans').getAll().onsuccess = (e) => {
+          const spans = (e.target as IDBRequest<SourceSpan[]>).result || [];
+          spans.forEach(s => this.cachedSpans.set(s.spanId, s));
+        };
+
+        tx.objectStore('file_hashes').getAll().onsuccess = (e) => {
+          const hashes = (e.target as IDBRequest<{ hash: string }[]>).result || [];
+          hashes.forEach(h => this.cachedHashes.add(h.hash));
+        };
+
+        tx.oncomplete = () => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            this.isHydrated = true;
+            resolve();
+          }
+        };
+      } catch {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          this.isHydrated = true;
+          resolve();
+        }
+      }
+    });
+  }
+
+  /**
+   * Checks if an identical file hash has already been committed (Deduplication Check)
+   */
+  public async hasFileHash(hash: string): Promise<boolean> {
+    if (this.hydrationPromise) {
+      await Promise.race([
+        this.hydrationPromise,
+        new Promise((r) => setTimeout(r, 1500))
+      ]);
+    }
+    return this.cachedHashes.has(hash);
+  }
+
+  /**
+   * Synchronous check for hash deduplication
+   */
+  public hasFileHashSync(hash: string): boolean {
+    return this.cachedHashes.has(hash);
+  }
+
+  /**
+   * Synchronous accessor for currently ingested graph elements
+   */
+  public getIngestedGraphSync(): { nodes: GraphNode[]; edges: GraphEdge[] } {
+    return {
+      nodes: Array.from(this.cachedNodes.values()),
+      edges: Array.from(this.cachedEdges.values())
+    };
+  }
+
+  /**
+   * Asynchronous accessor ensuring hydration is complete
+   */
+  public async getIngestedGraph(): Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }> {
+    if (this.hydrationPromise) {
+      await Promise.race([
+        this.hydrationPromise,
+        new Promise((r) => setTimeout(r, 1500))
+      ]);
+    }
+    return this.getIngestedGraphSync();
+  }
+
+  /**
+   * Pre-Commit Integrity Validation:
+   * 1. Unique node IDs
+   * 2. Edge endpoint verification without aborting on partial references
+   * 3. Retains all valid edges while safely filtering unresolvable orphans
+   */
+  private filterValidBatchEdges(
+    nodes: GraphNode[],
+    edges: GraphEdge[]
+  ): GraphEdge[] {
+    const nodeIds = new Set<string>(this.cachedNodes.keys());
+
+    // Include all baseline topology node IDs and aliases as valid endpoints
+    for (const bId of this.allBaselineIds) {
+      nodeIds.add(bId);
+    }
+
+    for (const n of nodes) {
+      nodeIds.add(n.id);
+    }
+
+    const validEdges: GraphEdge[] = [];
+    for (const rawEdge of edges) {
+      // Normalize any alias targets/sources to canonical baseline IDs
+      const targetId = BASELINE_ID_ALIASES[rawEdge.target] || rawEdge.target;
+      const sourceId = BASELINE_ID_ALIASES[rawEdge.source] || rawEdge.source;
+
+      const e: GraphEdge =
+        targetId !== rawEdge.target || sourceId !== rawEdge.source
+          ? { ...rawEdge, source: sourceId, target: targetId }
+          : rawEdge;
+
+      const hasSource = nodeIds.has(e.source);
+      const hasTarget =
+        nodeIds.has(e.target) ||
+        e.target.startsWith('unresolved_') ||
+        e.target.startsWith('ref_') ||
+        e.target.startsWith('concept_');
+
+      if (hasSource && hasTarget) {
+        validEdges.push(e);
+      }
+    }
+
+    return validEdges;
+  }
+
+  private runTransaction(
+    db: IDBDatabase,
+    storeNames: string[],
+    mode: IDBTransactionMode,
+    executor: (tx: IDBTransaction) => void,
+    timeoutMs = 4000
+  ): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          reject(new Error(`IndexedDB transaction timed out after ${timeoutMs}ms`));
+        }
+      }, timeoutMs);
+
+      const finish = (err?: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (err) {
+          reject(err instanceof Error ? err : new Error(String(err)));
+        } else {
+          resolve();
+        }
+      };
+
+      try {
+        const tx = db.transaction(storeNames, mode);
+        tx.oncomplete = () => finish();
+        tx.onerror = () => finish(tx.error || new Error('IndexedDB transaction failed'));
+        tx.onabort = () => finish(tx.error || new Error('IndexedDB transaction aborted'));
+        executor(tx);
+      } catch (err) {
+        finish(err);
+      }
+    });
+  }
+
+  /**
+   * Atomic commit of extracted nodes, edges, spans, document metadata, and file hash.
+   * Chunks node and edge insertions into 500-item transactions to prevent IPC starvation.
+   * Gracefully updates in-memory cache even if browser IndexedDB fails.
+   */
+  public async commitBatchExtraction(
+    hash: string,
+    nodes: GraphNode[],
+    edges: GraphEdge[],
+    documentRecord?: SourceDocument
+  ): Promise<void> {
+    if (this.hydrationPromise) {
+      await Promise.race([
+        this.hydrationPromise,
+        new Promise((r) => setTimeout(r, 1500))
+      ]);
+    }
+
+    // 1. Pre-Commit Validation & Orphan Edge Pruning
+    const sanitizedDoc = sanitizeDocumentRecord(documentRecord);
+    const sanitizedNodes = nodes.map(sanitizeNode);
+    const validEdges = this.filterValidBatchEdges(sanitizedNodes, edges);
+
+    const db = await this.getDb();
+
+    // 2. Commit to IndexedDB in bounded batches with per-transaction safety timeouts
+    if (db) {
+      try {
+        // 2a. Store Document Record
+        if (sanitizedDoc) {
+          await this.runTransaction(db, ['documents'], 'readwrite', (tx) => {
+            tx.objectStore('documents').put(sanitizedDoc);
+          });
+        }
+
+        // 2b. Store Nodes & Source Spans in batches of TRANSACTION_BATCH_SIZE (500)
+        for (let i = 0; i < sanitizedNodes.length; i += TRANSACTION_BATCH_SIZE) {
+          const nodeBatch = sanitizedNodes.slice(i, i + TRANSACTION_BATCH_SIZE);
+          await this.runTransaction(db, ['nodes', 'source_spans'], 'readwrite', (tx) => {
+            const nodeStore = tx.objectStore('nodes');
+            const spanStore = tx.objectStore('source_spans');
+
+            for (const node of nodeBatch) {
+              nodeStore.put(node);
+              if (node.sourceSpans) {
+                for (const span of node.sourceSpans) {
+                  spanStore.put(span);
+                }
+              }
+            }
+          });
+        }
+
+        // 2c. Store Edges in batches of TRANSACTION_BATCH_SIZE (500)
+        for (let i = 0; i < validEdges.length; i += TRANSACTION_BATCH_SIZE) {
+          const edgeBatch = validEdges.slice(i, i + TRANSACTION_BATCH_SIZE);
+          await this.runTransaction(db, ['edges'], 'readwrite', (tx) => {
+            const edgeStore = tx.objectStore('edges');
+            for (const edge of edgeBatch) {
+              edgeStore.put(edge);
+            }
+          });
+        }
+
+        // 2d. Store Hash Fingerprint
+        await this.runTransaction(db, ['file_hashes'], 'readwrite', (tx) => {
+          tx.objectStore('file_hashes').put({ hash, timestamp: Date.now() });
+        });
+      } catch (idbErr) {
+        const isQuota =
+          idbErr instanceof DOMException &&
+          (idbErr.name === 'QuotaExceededError' || idbErr.code === 22);
+        console.warn(
+          isQuota
+            ? '[GraphStorage] IndexedDB quota exceeded; persisting in synchronous memory cache only:'
+            : '[GraphStorage] IndexedDB write failed or timed out, committing to synchronous in-memory store:',
+          idbErr
+        );
+      }
+    }
+
+    // 3. Atomically update in-memory cache once transactions succeed or fallback triggers
+    if (sanitizedDoc) {
+      this.cachedDocuments.set(sanitizedDoc.id, sanitizedDoc);
+    }
+    for (const node of sanitizedNodes) {
+      this.cachedNodes.set(node.id, node);
+      if (node.sourceSpans) {
+        for (const s of node.sourceSpans) {
+          this.cachedSpans.set(s.spanId, s);
+        }
+      }
+    }
+    for (const edge of validEdges) {
+      this.cachedEdges.set(edge.id, edge);
+    }
+    this.cachedHashes.add(hash);
+  }
+
+  /**
+   * Resets all user-ingested data while leaving baseline application nodes untouched
+   */
+  public async clearIngestedGraph(): Promise<void> {
+    const db = await this.getDb();
+
+    if (db) {
+      try {
+        await Promise.race([
+          new Promise<void>((resolve, reject) => {
+            try {
+              const tx = db.transaction(
+                ['documents', 'nodes', 'edges', 'source_spans', 'file_hashes'],
+                'readwrite'
+              );
+              tx.oncomplete = () => resolve();
+              tx.onerror = () => reject(new Error(`Clear transaction failed: ${tx.error?.message}`));
+              tx.onabort = () => reject(new Error(`Clear transaction aborted: ${tx.error?.message}`));
+
+              tx.objectStore('documents').clear();
+              tx.objectStore('nodes').clear();
+              tx.objectStore('edges').clear();
+              tx.objectStore('source_spans').clear();
+              tx.objectStore('file_hashes').clear();
+            } catch (err) {
+              reject(err);
+            }
+          }),
+          new Promise<void>((r) => setTimeout(r, 2000))
+        ]);
+      } catch {
+        // Fallback to clearing in-memory store
+      }
+    }
+
+    this.cachedNodes.clear();
+    this.cachedEdges.clear();
+    this.cachedDocuments.clear();
+    this.cachedSpans.clear();
+    this.cachedHashes.clear();
+  }
+
+  /**
+   * Retrieves count of incident edges for a node in synchronous cache
+   */
+  public countIncidentEdges(nodeId: string): number {
+    let count = 0;
+    for (const edge of this.cachedEdges.values()) {
+      if (edge.source === nodeId || edge.target === nodeId) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * Creates and persists a custom conceptual node with an optional initial incident edge
+   */
+  public async createCustomNode(node: GraphNode, parentEdge?: GraphEdge): Promise<void> {
+    const safeNode = sanitizeNode(node);
+    const db = await this.getDb();
+    if (db) {
+      try {
+        const stores = parentEdge ? ['nodes', 'edges'] : ['nodes'];
+        await this.runTransaction(db, stores, 'readwrite', (tx) => {
+          tx.objectStore('nodes').put(safeNode);
+          if (parentEdge) {
+            tx.objectStore('edges').put(parentEdge);
+          }
+        });
+      } catch (err) {
+        console.warn('[GraphStorage] createCustomNode IDB fallback:', err);
+      }
+    }
+
+    this.cachedNodes.set(safeNode.id, safeNode);
+    if (parentEdge) {
+      this.cachedEdges.set(parentEdge.id, parentEdge);
+    }
+  }
+
+  /**
+   * Updates a node's label and title atomically
+   */
+  public async updateNodeTitle(nodeId: string, newTitle: string): Promise<void> {
+    const trimmed = newTitle.trim();
+    if (!trimmed) return;
+
+    const existing = this.cachedNodes.get(nodeId);
+    if (!existing) return;
+
+    const updated: GraphNode = {
+      ...existing,
+      title: trimmed,
+      label: trimmed
+    };
+
+    const db = await this.getDb();
+    if (db) {
+      try {
+        await this.runTransaction(db, ['nodes'], 'readwrite', (tx) => {
+          tx.objectStore('nodes').put(updated);
+        });
+      } catch (err) {
+        console.warn('[GraphStorage] updateNodeTitle IDB fallback:', err);
+      }
+    }
+
+    this.cachedNodes.set(nodeId, updated);
+  }
+
+  /**
+   * Atomically deletes a node and all incident edges across IndexedDB and synchronous memory cache.
+   * Returns list of deleted incident edge IDs so callers can synchronize external React state.
+   */
+  public async deleteNodeWithCascade(nodeId: string): Promise<string[]> {
+    const deletedEdgeIds: string[] = [];
+
+    // Identify incident edges in cache
+    for (const [edgeId, edge] of this.cachedEdges.entries()) {
+      if (edge.source === nodeId || edge.target === nodeId) {
+        deletedEdgeIds.push(edgeId);
+      }
+    }
+
+    const db = await this.getDb();
+    if (db) {
+      try {
+        await this.runTransaction(db, ['nodes', 'edges'], 'readwrite', (tx) => {
+          tx.objectStore('nodes').delete(nodeId);
+          const edgeStore = tx.objectStore('edges');
+          for (const edgeId of deletedEdgeIds) {
+            edgeStore.delete(edgeId);
+          }
+        });
+      } catch (err) {
+        console.warn('[GraphStorage] deleteNodeWithCascade IDB fallback:', err);
+      }
+    }
+
+    this.cachedNodes.delete(nodeId);
+    for (const edgeId of deletedEdgeIds) {
+      this.cachedEdges.delete(edgeId);
+    }
+
+    return deletedEdgeIds;
+  }
+
+  /**
+   * Deletes a specific ingested node and its associated edges (alias to deleteNodeWithCascade)
+   */
+  public async deleteNode(nodeId: string): Promise<void> {
+    await this.deleteNodeWithCascade(nodeId);
+  }
+
+  public async getDocument(docId: string): Promise<SourceDocument | undefined> {
+    if (this.hydrationPromise) {
+      await Promise.race([this.hydrationPromise, new Promise((r) => setTimeout(r, 1500))]);
+    }
+    return this.cachedDocuments.get(docId);
+  }
+
+  public async getSourceSpan(spanId: string): Promise<SourceSpan | undefined> {
+    if (this.hydrationPromise) {
+      await Promise.race([this.hydrationPromise, new Promise((r) => setTimeout(r, 1500))]);
+    }
+    return this.cachedSpans.get(spanId);
+  }
+
+  public async searchNodes(query: string): Promise<GraphNode[]> {
+    if (this.hydrationPromise) {
+      await Promise.race([this.hydrationPromise, new Promise((r) => setTimeout(r, 1500))]);
+    }
+    const lower = query.toLowerCase().trim();
+    if (!lower) return [];
+    return Array.from(this.cachedNodes.values()).filter(n =>
+      (n.label || '').toLowerCase().includes(lower) ||
+      (n.title || '').toLowerCase().includes(lower) ||
+      (n.description || '').toLowerCase().includes(lower)
+    );
+  }
+
+  public getSnapshot(): GraphPersistenceSnapshot {
+    return {
+      documents: Array.from(this.cachedDocuments.values()),
+      nodes: Array.from(this.cachedNodes.values()),
+      edges: Array.from(this.cachedEdges.values()),
+      fileHashes: Array.from(this.cachedHashes.values()),
+      timestamp: Date.now()
+    };
+  }
+}
+
+export const GraphStorage = new GraphStorageEngine();

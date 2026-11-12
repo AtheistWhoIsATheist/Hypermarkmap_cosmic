@@ -13,7 +13,7 @@ export const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE;
 /**
  * Deterministic cyrb53 / 64-bit hash function for pure-TypeScript cryptographic fallback
  */
-function cyrb53(strOrBytes: string | Uint8Array, seed = 0): string {
+function cyrb53Pass(strOrBytes: string | Uint8Array, seed = 0): string {
   let h1 = 0xdeadbeef ^ seed;
   let h2 = 0x41c6ce57 ^ seed;
 
@@ -38,11 +38,15 @@ function cyrb53(strOrBytes: string | Uint8Array, seed = 0): string {
 
   const hex1 = (h1 >>> 0).toString(16).padStart(8, '0');
   const hex2 = (h2 >>> 0).toString(16).padStart(8, '0');
-  // Combine 4 passes with varying seeds to produce 64-char hex string
-  const p1 = hex1 + hex2;
-  const p2 = cyrb53(strOrBytes, 101);
-  const p3 = cyrb53(strOrBytes, 202);
-  const p4 = cyrb53(strOrBytes, 303);
+  return hex1 + hex2;
+}
+
+function cyrb53(strOrBytes: string | Uint8Array): string {
+  // Combine 4 independent 64-bit passes to produce a 64-char hex digest without recursion
+  const p1 = cyrb53Pass(strOrBytes, 0);
+  const p2 = cyrb53Pass(strOrBytes, 101);
+  const p3 = cyrb53Pass(strOrBytes, 202);
+  const p4 = cyrb53Pass(strOrBytes, 303);
   return (p1 + p2 + p3 + p4).substring(0, 64);
 }
 

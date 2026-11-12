@@ -174,7 +174,12 @@ export function ArchitectShell() {
             onTriggerLoop={() => void triggerLoop()}
           />
         )}
-        {activeTab === 'hypermap' && <HypermapDialecticView onTriggerResearchLoop={(focus) => void triggerLoopWithFocus(focus)} />}
+        {activeTab === 'hypermap' && (
+          <HypermapDialecticView
+            aiConfigured={aiConfigured}
+            onTriggerResearchLoop={(focus) => void triggerLoopWithFocus(focus)}
+          />
+        )}
         {activeTab === 'corpus' && <CorpusExplorerView />}
         {activeTab === 'manuscript' && <ManuscriptView />}
         {activeTab === 'dialectic' && <DialecticEngineView />}

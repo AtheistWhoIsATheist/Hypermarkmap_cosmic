@@ -37,6 +37,7 @@ export class TextParser extends BaseParser implements FileParser {
     const nodes: GraphNode[] = [];
     const edges: GraphEdge[] = [];
     const seenNodeIds = new Set<string>();
+    const nodeMap = new Map<string, GraphNode>();
 
     const addNode = (n: GraphNode): boolean => {
       if (nodes.length >= MAX_NODES_PER_DOCUMENT) {
@@ -51,6 +52,7 @@ export class TextParser extends BaseParser implements FileParser {
           n.description = n.description.substring(0, MAX_NODE_TEXT_CHARS) + '… [truncated]';
         }
         nodes.push(n);
+        nodeMap.set(n.id, n);
         return true;
       }
       return true;
@@ -104,7 +106,10 @@ export class TextParser extends BaseParser implements FileParser {
 
         if (nodes.length < MAX_NODES_PER_DOCUMENT) {
           const classification = this.classifyExcerpt(text, activeHeadingPath);
-          const label = text.split('.')[0].substring(0, 60).trim();
+          const label =
+            text.split('.')[0].substring(0, 60).trim() ||
+            text.substring(0, 60).trim() ||
+            'Proposition';
 
           // Modality & Confidence detection
           let modality: 'objection' | 'question' | 'assertion' | 'phenomenological-description' = 'assertion';
@@ -165,7 +170,7 @@ export class TextParser extends BaseParser implements FileParser {
           );
         } else {
           aggregatedParagraphCount++;
-          const secNode = nodes.find((n) => n.id === activeSectionId);
+          const secNode = nodeMap.get(activeSectionId);
           if (secNode) {
             secNode.metadata.aggregatedParagraphs =
               (Number(secNode.metadata.aggregatedParagraphs) || 0) + 1;
@@ -265,11 +270,15 @@ export class TextParser extends BaseParser implements FileParser {
           options?.onProgress?.(`Streaming plaintext (${pct}%)...`, bytesRead / totalBytes);
 
           for (const line of linesBatch) {
+            if (options?.signal?.aborted) {
+              throw new Error('Text parsing aborted due to timeout or cancellation.');
+            }
             processLine(line);
           }
           await yieldToMain();
         },
-        2 * 1024 * 1024
+        2 * 1024 * 1024,
+        options?.signal
       );
     } else {
       options?.onProgress?.('Reading document text...', 0.05);
@@ -279,6 +288,9 @@ export class TextParser extends BaseParser implements FileParser {
       const total = lines.length;
 
       for (let i = 0; i < total; i++) {
+        if (options?.signal?.aborted) {
+          throw new Error('Text parsing aborted due to timeout or cancellation.');
+        }
         processLine(lines[i]);
         if (i % 100 === 0 && i > 0) {
           const pct = Math.round((i / total) * 100);
@@ -290,11 +302,7 @@ export class TextParser extends BaseParser implements FileParser {
 
     flushParagraph();
 
-    // Link connectedNodeIds
-    const nodeMap = new Map<string, GraphNode>();
-    for (const node of nodes) {
-      nodeMap.set(node.id, node);
-    }
+    // Link connectedNodeIds using pre-populated O(1) nodeMap
     for (const edge of edges) {
       const srcNode = nodeMap.get(edge.source);
       const tgtNode = nodeMap.get(edge.target);

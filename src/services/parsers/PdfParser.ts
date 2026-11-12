@@ -109,11 +109,11 @@ export class PdfParser extends BaseParser implements FileParser {
       if (typeof DecompressionStream !== 'undefined') {
         const ds = new DecompressionStream('deflate');
         const writer = ds.writable.getWriter();
-        writer.write(data as unknown as BufferSource);
-        writer.close();
+        const readPromise = new Response(ds.readable).arrayBuffer();
+        await writer.write(data as unknown as BufferSource);
+        await writer.close();
 
-        const response = new Response(ds.readable);
-        const decompressedArray = await response.arrayBuffer();
+        const decompressedArray = await readPromise;
         return new TextDecoder('latin1').decode(decompressedArray);
       }
       return new TextDecoder('latin1').decode(data);
@@ -146,14 +146,18 @@ export class PdfParser extends BaseParser implements FileParser {
     const pageTexts: Array<{ pageNumber: number; text: string }> = [];
     let usedPdfJs = false;
 
-    // Check if pdfjsLib is globally available
+    // Check if pdfjsLib is globally available (guard full-buffer load at 64 MiB)
     // @ts-ignore
     const pdfjs = (typeof window !== 'undefined' && (window as any).pdfjsLib) || null;
+    const MAX_PDFJS_INMEMORY_BYTES = 64 * 1024 * 1024;
 
-    if (pdfjs && typeof pdfjs.getDocument === 'function') {
+    if (pdfjs && typeof pdfjs.getDocument === 'function' && file.size <= MAX_PDFJS_INMEMORY_BYTES) {
       let pdfDoc: any = null;
       let loadingTask: any = null;
       try {
+        if (options?.signal?.aborted) {
+          throw new Error('PDF parsing aborted due to timeout or cancellation.');
+        }
         const data = await file.arrayBuffer();
         loadingTask = pdfjs.getDocument({
           data,
@@ -165,6 +169,9 @@ export class PdfParser extends BaseParser implements FileParser {
 
         const numPages = pdfDoc.numPages;
         for (let p = 1; p <= numPages; p++) {
+          if (options?.signal?.aborted) {
+            throw new Error('PDF parsing aborted due to timeout or cancellation.');
+          }
           const page = await pdfDoc.getPage(p);
           try {
             const textContent = await page.getTextContent();
@@ -187,7 +194,10 @@ export class PdfParser extends BaseParser implements FileParser {
           }
         }
         usedPdfJs = true;
-      } catch {
+      } catch (err) {
+        if (options?.signal?.aborted) {
+          throw err instanceof Error ? err : new Error('PDF parsing aborted.');
+        }
         usedPdfJs = false;
       } finally {
         if (pdfDoc) {
@@ -197,17 +207,29 @@ export class PdfParser extends BaseParser implements FileParser {
             // ignore cleanup errors
           }
         }
+        if (loadingTask && typeof loadingTask.destroy === 'function') {
+          try {
+            await loadingTask.destroy();
+          } catch {
+            // ignore cleanup errors
+          }
+        }
       }
     }
 
-    // Fallback: 4 MB window streaming scanner through PDF binary slices
+    // Fallback: 4 MB overlapping window streaming scanner through PDF binary slices
     if (!usedPdfJs) {
       const WINDOW_SIZE = 4 * 1024 * 1024;
+      const WINDOW_OVERLAP = 8192;
       let offset = 0;
       let pageCounter = 1;
       const totalBytes = file.size;
+      const seenStreamOffsets = new Set<number>();
 
       while (offset < totalBytes && pageTexts.length < MAX_NODES_PER_DOCUMENT) {
+        if (options?.signal?.aborted) {
+          throw new Error('PDF scanning aborted due to timeout or cancellation.');
+        }
         const end = Math.min(offset + WINDOW_SIZE, totalBytes);
         const windowBuf = await file.slice(offset, end).arrayBuffer();
         const windowBytes = new Uint8Array(windowBuf);
@@ -228,8 +250,14 @@ export class PdfParser extends BaseParser implements FileParser {
             break;
           }
 
-          const streamContent = windowAscii.substring(contentStart, streamEndIdx);
           searchPos = streamEndIdx + 9;
+          const globalStreamOffset = offset + streamStartIdx;
+          if (seenStreamOffsets.has(globalStreamOffset)) {
+            continue;
+          }
+          seenStreamOffsets.add(globalStreamOffset);
+
+          const streamContent = windowAscii.substring(contentStart, streamEndIdx);
 
           let textFound = this.extractTextFromStream(streamContent);
           if (!textFound && streamContent.length > 50) {
@@ -250,9 +278,10 @@ export class PdfParser extends BaseParser implements FileParser {
           }
         }
 
-        offset = end;
-        const pct = Math.round((offset / totalBytes) * 100);
-        options?.onProgress?.(`Scanning PDF stream (${pct}%)...`, offset / totalBytes);
+        const nextOffset = end >= totalBytes ? totalBytes : Math.max(offset + 1, end - WINDOW_OVERLAP);
+        offset = nextOffset;
+        const pct = totalBytes > 0 ? Math.round((offset / totalBytes) * 100) : 100;
+        options?.onProgress?.(`Scanning PDF stream (${pct}%)...`, totalBytes > 0 ? offset / totalBytes : 1);
         await yieldToMain();
       }
     }

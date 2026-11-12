@@ -30,6 +30,8 @@ import {
   Sparkles
 } from 'lucide-react';
 import { GroundedEpistemicTopology } from './GroundedEpistemicTopology';
+import { ConfirmModal } from '../../components/ConfirmModal';
+import { triggerBlobDownload } from '../../services/export/downloadHelper';
 import { api } from '../api';
 import type {
   HypermapNode,
@@ -41,10 +43,12 @@ import type {
 } from '../types';
 
 interface HypermapDialecticViewProps {
+  aiConfigured?: boolean;
   onTriggerResearchLoop?: (focusArea: string) => void;
 }
 
 export const HypermapDialecticView: React.FC<HypermapDialecticViewProps> = ({
+  aiConfigured = false,
   onTriggerResearchLoop
 }) => {
   // Tree & Hierarchy State
@@ -67,6 +71,8 @@ export const HypermapDialecticView: React.FC<HypermapDialecticViewProps> = ({
   // Modals & Action States
   const [showAddModal, setShowAddModal] = useState<boolean>(false);
   const [showEditModal, setShowEditModal] = useState<boolean>(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState<boolean>(false);
+  const [actionFeedback, setActionFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [densifying, setDensifying] = useState<boolean>(false);
   const [densifySuccessMsg, setDensifySuccessMsg] = useState<string | null>(null);
   const [densifyStrategy, setDensifyStrategy] = useState<string>('Paraconsistent LP Antinomy & Adversarial Defeater');
@@ -92,29 +98,65 @@ export const HypermapDialecticView: React.FC<HypermapDialecticViewProps> = ({
   const svgRef = useRef<SVGSVGElement | null>(null);
   const gRef = useRef<SVGGElement | null>(null);
   const zoomBehaviorRef = useRef<d3.ZoomBehavior<SVGSVGElement, unknown> | null>(null);
+  const currentZoomTransformRef = useRef<d3.ZoomTransform | null>(null);
+  const lastRootFilterRef = useRef<string>(rootFilter);
+  const xCenterRef = useRef<number>(0);
+  const mountedRef = useRef<boolean>(true);
+  const loadAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      loadAbortRef.current?.abort();
+    };
+  }, []);
 
   // Load Tree Data and Stats
   const loadHypermap = useCallback(async (root?: string) => {
+    loadAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadAbortRef.current = controller;
+
     try {
       setLoading(true);
       setError(null);
       const [tree, st] = await Promise.all([
-        api.getHypermapTree(root === 'all' ? undefined : root),
-        api.getHypermapStats()
+        api.getHypermapTree(root === 'all' ? undefined : root, controller.signal),
+        api.getHypermapStats(controller.signal)
       ]);
+      if (!mountedRef.current || loadAbortRef.current !== controller) return;
       setTreeData(tree);
       setStats(st);
     } catch (err: any) {
+      if (err?.name === 'AbortError' || controller.signal.aborted) return;
       console.error('Failed to load hypermap tree:', err);
+      if (!mountedRef.current || loadAbortRef.current !== controller) return;
       setError(err.message || 'Failed to initialize Hypermap Matrix');
     } finally {
-      setLoading(false);
+      if (mountedRef.current && loadAbortRef.current === controller) {
+        setLoading(false);
+      }
     }
   }, []);
 
   useEffect(() => {
-    loadHypermap(rootFilter);
+    void loadHypermap(rootFilter);
   }, [rootFilter, loadHypermap]);
+
+  useEffect(() => {
+    if (!showDeleteConfirm && !showEditModal && !showAddModal && !drawerOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.key !== 'Escape') return;
+      e.preventDefault();
+      if (showDeleteConfirm) setShowDeleteConfirm(false);
+      else if (showEditModal) setShowEditModal(false);
+      else if (showAddModal) setShowAddModal(false);
+      else if (drawerOpen) setDrawerOpen(false);
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [showDeleteConfirm, showEditModal, showAddModal, drawerOpen]);
 
   // Node Color Mapper
   const getNodeColor = (type: string, warrant?: string) => {
@@ -151,14 +193,13 @@ export const HypermapDialecticView: React.FC<HypermapDialecticViewProps> = ({
     }
   };
 
-  // D3 Hierarchical Rendering Engine
+  // D3 Hierarchical Rendering Engine (Structural build — preserves zoom across collapses/reloads)
   useEffect(() => {
     if (!treeData || !svgRef.current) return;
 
     const svg = d3.select(svgRef.current);
     svg.selectAll('*').remove();
 
-    const width = svgRef.current.clientWidth || 1200;
     const height = svgRef.current.clientHeight || 750;
 
     // Outer Main Group
@@ -169,6 +210,7 @@ export const HypermapDialecticView: React.FC<HypermapDialecticViewProps> = ({
     const zoom = d3.zoom<SVGSVGElement, unknown>()
       .scaleExtent([0.15, 3.5])
       .on('zoom', (event) => {
+        currentZoomTransformRef.current = event.transform;
         g.attr('transform', event.transform);
       });
 
@@ -176,56 +218,37 @@ export const HypermapDialecticView: React.FC<HypermapDialecticViewProps> = ({
     zoomBehaviorRef.current = zoom;
 
     // D3 Hierarchy Conversion
-    // Clone tree data to allow mutable _collapsed toggles
     const hierarchyData = d3.hierarchy<HypermapTreeNode>(treeData, (d) => {
       if (d._collapsed) return null;
       return d.children;
     });
 
-    // Compute tree layout
-    // Dynamic node size based on depth and density
     const dx = 42;
     const dy = 260;
     const treeLayout = d3.tree<HypermapTreeNode>().nodeSize([dx, dy]);
     treeLayout(hierarchyData);
 
-    // Compute bounding box to set initial zoom & center
     let x0 = Infinity;
     let x1 = -x0;
-    let y0 = Infinity;
-    let y1 = -y0;
-
     hierarchyData.each((d: any) => {
       if (d.x > x1) x1 = d.x;
       if (d.x < x0) x0 = d.x;
-      if (d.y > y1) y1 = d.y;
-      if (d.y < y0) y0 = d.y;
     });
+    const xCenter = Number.isFinite(x0 + x1) ? (x0 + x1) / 2 : 0;
+    xCenterRef.current = xCenter;
 
-    // Initial transform: center root on the left
-    const initialTransform = d3.zoomIdentity
-      .translate(80, height / 2 - (x0 + x1) / 2)
-      .scale(0.85);
+    if (lastRootFilterRef.current !== rootFilter) {
+      currentZoomTransformRef.current = null;
+      lastRootFilterRef.current = rootFilter;
+    }
 
-    svg.call(zoom.transform, initialTransform);
+    const activeTransform =
+      currentZoomTransformRef.current ||
+      d3.zoomIdentity
+        .translate(80, height / 2 - xCenter)
+        .scale(0.85);
 
-    // Filter matching predicate
-    const matchesSearch = (d: any) => {
-      if (!searchQuery.trim()) return false;
-      const q = searchQuery.toLowerCase();
-      return (
-        d.data.title.toLowerCase().includes(q) ||
-        d.data.payload_text.toLowerCase().includes(q) ||
-        (d.data.warrant_category && d.data.warrant_category.toLowerCase().includes(q)) ||
-        (d.data.paradox_relation && d.data.paradox_relation.toLowerCase().includes(q))
-      );
-    };
-
-    const matchesFilter = (d: any) => {
-      if (typeFilter !== 'all' && d.data.node_type !== typeFilter) return false;
-      if (warrantFilter !== 'all' && d.data.warrant_category !== warrantFilter) return false;
-      return true;
-    };
+    svg.call(zoom.transform, activeTransform);
 
     // Render Links
     const linkGenerator = d3.linkHorizontal<any, any>()
@@ -242,7 +265,7 @@ export const HypermapDialecticView: React.FC<HypermapDialecticViewProps> = ({
       .attr('stroke', (d: any) => {
         if (d.target.data.node_type === 'paradox') return '#f43f5e88';
         if (d.target.data.node_type === 'objection') return '#f9731688';
-        return '#3f3f46'; // zinc-700
+        return '#3f3f46';
       })
       .attr('stroke-width', (d: any) => {
         if (d.target.data.node_type === 'paradox') return 2;
@@ -261,40 +284,31 @@ export const HypermapDialecticView: React.FC<HypermapDialecticViewProps> = ({
       .selectAll('g')
       .data(hierarchyData.descendants())
       .join('g')
+      .attr('class', 'hypermap-node')
       .attr('transform', (d: any) => `translate(${d.y},${d.x})`)
       .attr('cursor', 'pointer')
       .on('click', (event, d: any) => {
         event.stopPropagation();
         setSelectedNode(d.data);
+        setDensifySuccessMsg(null);
         setDrawerOpen(true);
       })
       .on('dblclick', (event, d: any) => {
         event.stopPropagation();
-        // Toggle collapse state
         d.data._collapsed = !d.data._collapsed;
         setTreeData({ ...treeData });
       });
 
-    // Node Outer Glow for Paradox or Search Match
-    node.each(function (d: any) {
-      const el = d3.select(this);
-      const isSearchMatch = matchesSearch(d);
-      const isParadox = d.data.node_type === 'paradox';
-      const isSelected = selectedNode?.id === d.data.id;
-
-      if (isSearchMatch || isParadox || isSelected) {
-        el.append('circle')
-          .attr('r', isSelected ? 18 : isSearchMatch ? 16 : 14)
-          .attr('fill', 'none')
-          .attr('stroke', isSelected ? '#38bdf8' : isSearchMatch ? '#fbbf24' : '#f43f5e')
-          .attr('stroke-width', 2)
-          .attr('opacity', 0.8)
-          .attr('class', 'animate-pulse');
-      }
-    });
+    // Dedicated highlight halo circle updated by lightweight style effect below
+    node.append('circle')
+      .attr('class', 'node-halo')
+      .attr('fill', 'none')
+      .attr('stroke-width', 2)
+      .attr('opacity', 0);
 
     // Node Main Circle
     node.append('circle')
+      .attr('class', 'node-core')
       .attr('r', (d: any) => {
         if (d.depth === 0) return 12;
         if (d.depth === 1) return 9;
@@ -341,6 +355,7 @@ export const HypermapDialecticView: React.FC<HypermapDialecticViewProps> = ({
 
     // Node Title Label
     node.append('text')
+      .attr('class', 'node-title')
       .attr('dy', '0.32em')
       .attr('x', (d: any) => (d.children && !d.data._collapsed ? -12 : 12))
       .attr('text-anchor', (d: any) => (d.children && !d.data._collapsed ? 'end' : 'start'))
@@ -351,18 +366,74 @@ export const HypermapDialecticView: React.FC<HypermapDialecticViewProps> = ({
       })
       .attr('font-family', (d: any) => d.depth <= 1 ? 'Georgia, serif' : 'system-ui, sans-serif')
       .attr('font-weight', (d: any) => d.depth <= 1 ? '600' : '400')
-      .attr('fill', (d: any) => {
-        if (matchesSearch(d)) return '#fbbf24';
-        if (!matchesFilter(d)) return '#52525b';
-        if (d.data.node_type === 'paradox') return '#fda4af';
-        if (d.data.node_type === 'objection') return '#fdba74';
-        return '#f4f4f5'; // zinc-100
-      })
       .text((d: any) => {
         const title = d.data.title;
         return title.length > 42 ? title.slice(0, 40) + '…' : title;
       });
 
+    return () => {
+      svg.interrupt();
+      svg.selectAll('*').interrupt();
+      svg.on('.zoom', null);
+    };
+  }, [treeData, rootFilter]);
+
+  // Lightweight styling update for search, filters, and selection (never resets zoom or rebuilds DOM)
+  useEffect(() => {
+    if (!gRef.current) return;
+    const g = d3.select(gRef.current);
+
+    const matchesSearch = (d: any) => {
+      if (!searchQuery.trim()) return false;
+      const q = searchQuery.toLowerCase();
+      return (
+        d.data.title.toLowerCase().includes(q) ||
+        d.data.payload_text.toLowerCase().includes(q) ||
+        (d.data.warrant_category && d.data.warrant_category.toLowerCase().includes(q)) ||
+        (d.data.paradox_relation && d.data.paradox_relation.toLowerCase().includes(q))
+      );
+    };
+
+    const matchesFilter = (d: any) => {
+      if (typeFilter !== 'all' && d.data.node_type !== typeFilter) return false;
+      if (warrantFilter !== 'all' && d.data.warrant_category !== warrantFilter) return false;
+      return true;
+    };
+
+    const nodes = g.selectAll<SVGGElement, any>('g.hypermap-node');
+
+    nodes.select<SVGCircleElement>('circle.node-halo')
+      .attr('r', (d: any) => {
+        const isSelected = selectedNode?.id === d.data.id;
+        const isSearchMatch = matchesSearch(d);
+        return isSelected ? 18 : isSearchMatch ? 16 : 14;
+      })
+      .attr('stroke', (d: any) => {
+        if (selectedNode?.id === d.data.id) return '#38bdf8';
+        if (matchesSearch(d)) return '#fbbf24';
+        return '#f43f5e';
+      })
+      .attr('opacity', (d: any) => {
+        const isSearchMatch = matchesSearch(d);
+        const isParadox = d.data.node_type === 'paradox';
+        const isSelected = selectedNode?.id === d.data.id;
+        return isSearchMatch || isParadox || isSelected ? 0.8 : 0;
+      })
+      .attr('class', (d: any) => {
+        const isSearchMatch = matchesSearch(d);
+        const isParadox = d.data.node_type === 'paradox';
+        const isSelected = selectedNode?.id === d.data.id;
+        return isSearchMatch || isParadox || isSelected ? 'node-halo animate-pulse' : 'node-halo';
+      });
+
+    nodes.select<SVGTextElement>('text.node-title')
+      .attr('fill', (d: any) => {
+        if (matchesSearch(d)) return '#fbbf24';
+        if (!matchesFilter(d)) return '#52525b';
+        if (d.data.node_type === 'paradox') return '#fda4af';
+        if (d.data.node_type === 'objection') return '#fdba74';
+        return '#f4f4f5';
+      });
   }, [treeData, searchQuery, typeFilter, warrantFilter, selectedNode]);
 
   // Zoom Controls Handlers
@@ -381,7 +452,7 @@ export const HypermapDialecticView: React.FC<HypermapDialecticViewProps> = ({
   const handleResetZoom = () => {
     if (svgRef.current && zoomBehaviorRef.current) {
       const height = svgRef.current.clientHeight || 750;
-      const transform = d3.zoomIdentity.translate(80, height / 2 - 100).scale(0.85);
+      const transform = d3.zoomIdentity.translate(80, height / 2 - xCenterRef.current).scale(0.85);
       d3.select(svgRef.current).transition().duration(400).call(zoomBehaviorRef.current.transform, transform);
     }
   };
@@ -414,22 +485,44 @@ export const HypermapDialecticView: React.FC<HypermapDialecticViewProps> = ({
     setTreeData(cloned);
   };
 
+  // Dialectical Densification Trigger (Canonical Topology callback)
+  const handleDensifyCanonicalNode = useCallback(async (nodeId: string) => {
+    setActionFeedback(null);
+    const res = await api.densifyHypermapNode(nodeId, densifyStrategy);
+    if (!mountedRef.current) return;
+    setDensifySuccessMsg(`Successfully synthesized ${res.newNodes.length} dialectical branches. Corpus Matrix now at ${res.totalTreeNodes} nodes.`);
+    setActionFeedback({
+      type: 'success',
+      message: `Synthesized ${res.newNodes.length} dialectical branches. Matrix now at ${res.totalTreeNodes} nodes.`
+    });
+    await loadHypermap(rootFilter);
+    const updated = await api.getHypermapNode(nodeId);
+    if (!mountedRef.current) return;
+    setSelectedNode((prev) => (prev && prev.id === nodeId ? { ...updated, children: prev.children } : { ...updated, children: [] }));
+  }, [densifyStrategy, loadHypermap, rootFilter]);
+
   // Dialectical Densification Trigger
   const handleDensifyNode = async () => {
     if (!selectedNode) return;
+    const targetId = selectedNode.id;
+    const existingChildren = selectedNode.children;
     try {
       setDensifying(true);
       setDensifySuccessMsg(null);
-      const res = await api.densifyHypermapNode(selectedNode.id, densifyStrategy);
+      setActionFeedback(null);
+      const res = await api.densifyHypermapNode(targetId, densifyStrategy);
+      if (!mountedRef.current) return;
       setDensifySuccessMsg(`Successfully synthesized ${res.newNodes.length} dialectical branches. Corpus Matrix now at ${res.totalTreeNodes} nodes.`);
       await loadHypermap(rootFilter);
       // Update selected node
-      const updated = await api.getHypermapNode(selectedNode.id);
-      setSelectedNode({ ...updated, children: selectedNode.children });
+      const updated = await api.getHypermapNode(targetId);
+      if (!mountedRef.current) return;
+      setSelectedNode({ ...updated, children: existingChildren });
     } catch (err: any) {
-      alert(`Densification failed: ${err.message}`);
+      if (!mountedRef.current) return;
+      setActionFeedback({ type: 'error', message: `Densification failed: ${err?.message || 'Unknown error'}` });
     } finally {
-      setDensifying(false);
+      if (mountedRef.current) setDensifying(false);
     }
   };
 
@@ -438,6 +531,7 @@ export const HypermapDialecticView: React.FC<HypermapDialecticViewProps> = ({
     e.preventDefault();
     if (!selectedNode) return;
     try {
+      setActionFeedback(null);
       const payload: HypermapNodeInput = {
         parent_id: selectedNode.id,
         root_tree_id: selectedNode.root_tree_id,
@@ -449,6 +543,7 @@ export const HypermapDialecticView: React.FC<HypermapDialecticViewProps> = ({
         paradox_relation: formData.paradox_relation || undefined
       };
       await api.addHypermapNode(payload);
+      if (!mountedRef.current) return;
       setShowAddModal(false);
       setFormData({
         title: '',
@@ -458,9 +553,11 @@ export const HypermapDialecticView: React.FC<HypermapDialecticViewProps> = ({
         epistemic_status: 'supported',
         paradox_relation: ''
       });
+      setActionFeedback({ type: 'success', message: `Added child node "${payload.title}".` });
       await loadHypermap(rootFilter);
     } catch (err: any) {
-      alert(`Failed to add node: ${err.message}`);
+      if (!mountedRef.current) return;
+      setActionFeedback({ type: 'error', message: `Failed to add node: ${err?.message || 'Unknown error'}` });
     }
   };
 
@@ -468,51 +565,62 @@ export const HypermapDialecticView: React.FC<HypermapDialecticViewProps> = ({
   const handleEditNode = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedNode) return;
+    const targetNode = selectedNode;
     try {
-      const updated = await api.updateHypermapNode(selectedNode.id, {
+      setActionFeedback(null);
+      const updated = await api.updateHypermapNode(targetNode.id, {
         title: formData.title,
         warrant_category: formData.warrant_category,
         payload_text: formData.payload_text,
         epistemic_status: formData.epistemic_status,
         paradox_relation: formData.paradox_relation
       });
+      if (!mountedRef.current) return;
       setShowEditModal(false);
-      setSelectedNode({ ...selectedNode, ...updated });
+      setSelectedNode({ ...targetNode, ...updated });
+      setActionFeedback({ type: 'success', message: `Updated node "${updated.title}".` });
       await loadHypermap(rootFilter);
     } catch (err: any) {
-      alert(`Failed to update node: ${err.message}`);
+      if (!mountedRef.current) return;
+      setActionFeedback({ type: 'error', message: `Failed to update node: ${err?.message || 'Unknown error'}` });
     }
   };
 
-  // Delete Node Submission
-  const handleDeleteNode = async () => {
+  // Delete Node Request & Confirmed Cascade Execution
+  const handleDeleteNode = () => {
     if (!selectedNode) return;
     if (selectedNode.node_type === 'root' || selectedNode.node_type === 'cosmos') {
-      alert('Cannot delete primary root tree.');
+      setActionFeedback({ type: 'error', message: 'Cannot delete primary root tree.' });
       return;
     }
-    const conf = window.confirm(`Are you sure you want to delete "${selectedNode.title}" and all its sub-branches from SQLite?`);
-    if (!conf) return;
+    setShowDeleteConfirm(true);
+  };
 
+  const confirmDeleteNode = async () => {
+    if (!selectedNode) return;
+    const targetId = selectedNode.id;
+    setShowDeleteConfirm(false);
     try {
-      const res = await api.deleteHypermapNode(selectedNode.id);
-      alert(`Cascade deleted ${res.deletedCount} nodes.`);
+      const res = await api.deleteHypermapNode(targetId);
+      if (!mountedRef.current) return;
+      setActionFeedback({ type: 'success', message: `Cascade deleted ${res.deletedCount} node(s).` });
       setDrawerOpen(false);
       setSelectedNode(null);
       await loadHypermap(rootFilter);
     } catch (err: any) {
-      alert(`Failed to delete: ${err.message}`);
+      if (!mountedRef.current) return;
+      setActionFeedback({ type: 'error', message: `Failed to delete node: ${err?.message || 'Unknown error'}` });
     }
   };
 
-  // Export Hypermap as JSON
+  // Export Hypermap as JSON via Blob URL lifecycle
   const handleExportJSON = () => {
     if (!treeData) return;
-    const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(treeData, null, 2));
-    const dlAnchor = document.createElement('a');
-    dlAnchor.setAttribute('href', dataStr);
-    dlAnchor.setAttribute('download', `nihiltheism_hypermap_${rootFilter}_${Date.now()}.json`);
-    dlAnchor.click();
+    const blob = new Blob([JSON.stringify(treeData, null, 2)], { type: 'application/json' });
+    triggerBlobDownload(
+      blob,
+      `nihiltheism_hypermap_${rootFilter}_${Date.now()}.json`
+    );
   };
 
   return (
@@ -650,12 +758,43 @@ export const HypermapDialecticView: React.FC<HypermapDialecticViewProps> = ({
         )}
       </div>
 
+      {/* Inline Action Feedback Banner */}
+      {actionFeedback && (
+        <div
+          role={actionFeedback.type === 'error' ? 'alert' : 'status'}
+          className={`p-3 rounded-xl border text-xs font-mono flex items-center justify-between gap-2 ${
+            actionFeedback.type === 'error'
+              ? 'bg-rose-950/60 border-rose-500/40 text-rose-200'
+              : 'bg-emerald-950/60 border-emerald-500/40 text-emerald-200'
+          }`}
+        >
+          <span className="flex items-center gap-2">
+            {actionFeedback.type === 'error' ? (
+              <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+            ) : (
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            )}
+            <span>{actionFeedback.message}</span>
+          </span>
+          <button
+            type="button"
+            onClick={() => setActionFeedback(null)}
+            className="p-1 rounded hover:bg-white/10 transition"
+            aria-label="Dismiss notification"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
       {/* Visual Engine Body: Grounded Epistemic Topology or D3 Tree Matrix */}
       {visualEngine === 'grounded_topology' ? (
         <div className="space-y-4">
           <GroundedEpistemicTopology
             canonicalTreeData={treeData}
             stats={stats}
+            aiConfigured={aiConfigured}
+            onDensifyCanonicalNode={handleDensifyCanonicalNode}
             onSelectCanonicalNode={(cNode) => {
               setSelectedNode(cNode);
               setDrawerOpen(true);
@@ -1273,6 +1412,22 @@ export const HypermapDialecticView: React.FC<HypermapDialecticViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* Safe Node Delete Confirm Modal */}
+      <ConfirmModal
+        isOpen={showDeleteConfirm}
+        title="Cascade Delete Hypermap Node?"
+        message={
+          selectedNode
+            ? `Are you sure you want to delete "${selectedNode.title}" and all its sub-branches from SQLite?`
+            : ''
+        }
+        itemDetails={selectedNode ? [`Node ID: ${selectedNode.id}`, `Type: ${selectedNode.node_type}`] : undefined}
+        confirmLabel="Delete Node & Branches"
+        confirmVariant="danger"
+        onConfirm={confirmDeleteNode}
+        onCancel={() => setShowDeleteConfirm(false)}
+      />
     </div>
   );
 };

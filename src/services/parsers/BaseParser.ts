@@ -32,7 +32,8 @@ export const yieldToMain = (): Promise<void> =>
 export async function streamFileLines(
   file: File,
   onLineBatch: (lines: string[], bytesRead: number, totalBytes: number) => Promise<void> | void,
-  chunkSize: number = 2 * 1024 * 1024
+  chunkSize: number = 2 * 1024 * 1024,
+  signal?: AbortSignal
 ): Promise<void> {
   const decoder = new TextDecoder('utf-8');
   const totalBytes = file.size;
@@ -40,6 +41,9 @@ export async function streamFileLines(
   let carryOver = '';
 
   while (offset < totalBytes) {
+    if (signal?.aborted) {
+      throw new Error('File streaming aborted due to timeout or cancellation.');
+    }
     const end = Math.min(offset + chunkSize, totalBytes);
     const sliceBuffer = await file.slice(offset, end).arrayBuffer();
     const isLastChunk = end >= totalBytes;
@@ -58,6 +62,9 @@ export async function streamFileLines(
   }
 
   if (carryOver.length > 0) {
+    if (signal?.aborted) {
+      throw new Error('File streaming aborted due to timeout or cancellation.');
+    }
     await onLineBatch([carryOver], totalBytes, totalBytes);
     await yieldToMain();
   }
@@ -90,6 +97,7 @@ export function chunkTextWithStep(
 
 export interface ParserOptions {
   enableAiEnrichment?: boolean;
+  signal?: AbortSignal;
   onProgress?: (stageLabel: string, progressFraction?: number) => void;
 }
 

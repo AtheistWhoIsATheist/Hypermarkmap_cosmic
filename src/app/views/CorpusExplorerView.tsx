@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Search,
   BookOpen,
@@ -31,6 +31,7 @@ export const CorpusExplorerView: React.FC = () => {
     'The subject reports an immediate vertigo upon realizing that all moral scaffolding is historically contingent.\n\nSection 2: The cessation of internal dialogue occurs around hour 4 of silent observation.\n\nSection 3: Symmetrical scrutiny forces the mind to acknowledge that neither materialism nor mysticism can claim default victory.'
   );
   const [ingestSuccess, setIngestSuccess] = useState<string | null>(null);
+  const [ingestError, setIngestError] = useState<string | null>(null);
   const [ingesting, setIngesting] = useState<boolean>(false);
 
   const sampleQueries = [
@@ -45,33 +46,85 @@ export const CorpusExplorerView: React.FC = () => {
     'Heidegger'
   ];
 
+  const mountedRef = useRef<boolean>(true);
+  const searchAbortRef = useRef<AbortController | null>(null);
+  const contextAbortRef = useRef<AbortController | null>(null);
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => {
-    handleSearch('void');
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      searchAbortRef.current?.abort();
+      contextAbortRef.current?.abort();
+      if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    };
   }, []);
 
-  const handleSearch = async (searchQuery: string) => {
-    if (!searchQuery.trim()) return;
+  const handleSearch = useCallback(async (searchQuery: string) => {
+    if (!searchQuery.trim()) {
+      searchAbortRef.current?.abort();
+      return;
+    }
+    searchAbortRef.current?.abort();
+    const controller = new AbortController();
+    searchAbortRef.current = controller;
+
     try {
       setLoading(true);
-      const results = await api.searchPassages(searchQuery, 30);
+      const results = await api.searchPassages(searchQuery, 30, controller.signal);
+      if (!mountedRef.current || searchAbortRef.current !== controller) return;
       setPassages(results);
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.name === 'AbortError' || controller.signal.aborted) return;
       console.error('Failed to search passages:', err);
     } finally {
-      setLoading(false);
+      if (mountedRef.current && searchAbortRef.current === controller) {
+        setLoading(false);
+      }
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    void handleSearch('void');
+  }, [handleSearch]);
+
+  useEffect(() => {
+    if (!selectedPassageId && !showIngest) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.key !== 'Escape') return;
+      e.preventDefault();
+      if (selectedPassageId) {
+        contextAbortRef.current?.abort();
+        setSelectedPassageId(null);
+        setContextData(null);
+      } else if (showIngest) {
+        setShowIngest(false);
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [selectedPassageId, showIngest]);
 
   const handleOpenPassage = async (id: string) => {
+    contextAbortRef.current?.abort();
+    const controller = new AbortController();
+    contextAbortRef.current = controller;
+
     try {
       setSelectedPassageId(id);
+      setContextData(null);
       setContextLoading(true);
-      const data = await api.getPassageContext(id);
+      const data = await api.getPassageContext(id, controller.signal);
+      if (!mountedRef.current || contextAbortRef.current !== controller) return;
       setContextData(data);
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.name === 'AbortError' || controller.signal.aborted) return;
       console.error('Failed to load passage context:', err);
     } finally {
-      setContextLoading(false);
+      if (mountedRef.current && contextAbortRef.current === controller) {
+        setContextLoading(false);
+      }
     }
   };
 
@@ -80,14 +133,17 @@ export const CorpusExplorerView: React.FC = () => {
     if (!ingestFilename || !ingestText) return;
     try {
       setIngesting(true);
+      setIngestError(null);
       const newSource = await api.ingestText(ingestFilename, ingestText);
+      if (!mountedRef.current) return;
       setIngestSuccess(`Ingested "${newSource.filename}" with SHA-256 hash ${newSource.sha256_hash.slice(0, 12)}... (${newSource.passage_count} passages created)`);
       setShowIngest(false);
-      handleSearch(query);
+      void handleSearch(query);
     } catch (err: any) {
-      alert(`Ingestion failed: ${err.message}`);
+      if (!mountedRef.current) return;
+      setIngestError(`Ingestion failed: ${err?.message || 'Unknown error'}`);
     } finally {
-      setIngesting(false);
+      if (mountedRef.current) setIngesting(false);
     }
   };
 
@@ -179,6 +235,18 @@ export const CorpusExplorerView: React.FC = () => {
         </form>
       )}
 
+      {ingestError && (
+        <div role="alert" className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-lg text-xs font-mono text-rose-300 flex items-center justify-between gap-2">
+          <span className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+            <span>{ingestError}</span>
+          </span>
+          <button onClick={() => setIngestError(null)} className="text-rose-400 hover:text-rose-200" aria-label="Dismiss ingestion error">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {ingestSuccess && (
         <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs font-mono text-emerald-400 flex items-center justify-between">
           <span>{ingestSuccess}</span>
@@ -197,8 +265,12 @@ export const CorpusExplorerView: React.FC = () => {
             placeholder="Search FTS5 full-text index (e.g. 'void', 'Eckhart', 'predicate hygiene', 'nothingness')..."
             value={query}
             onChange={(e) => {
-              setQuery(e.target.value);
-              handleSearch(e.target.value);
+              const nextValue = e.target.value;
+              setQuery(nextValue);
+              if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+              searchDebounceRef.current = setTimeout(() => {
+                void handleSearch(nextValue);
+              }, 200);
             }}
             className="w-full pl-10 pr-4 py-3 bg-zinc-900 border border-zinc-800 rounded-xl text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-amber-500/60 shadow-inner"
           />
@@ -211,8 +283,9 @@ export const CorpusExplorerView: React.FC = () => {
             <button
               key={q}
               onClick={() => {
+                if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
                 setQuery(q);
-                handleSearch(q);
+                void handleSearch(q);
               }}
               className={`text-[11px] font-mono px-2.5 py-1 rounded-full border transition ${
                 query.toLowerCase() === q.toLowerCase()

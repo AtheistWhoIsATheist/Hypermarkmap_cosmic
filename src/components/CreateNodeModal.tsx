@@ -83,9 +83,10 @@ export const CreateNodeModal: React.FC<CreateNodeModalProps> = ({
       setDescription('');
       setParentId(defaultParentId || '');
       setErrorMessage(null);
-      setTimeout(() => {
+      const focusTimer = setTimeout(() => {
         titleInputRef.current?.focus();
       }, 50);
+      return () => clearTimeout(focusTimer);
     }
   }, [isOpen, defaultParentId]);
 
