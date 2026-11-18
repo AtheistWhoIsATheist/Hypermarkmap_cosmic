@@ -5,11 +5,11 @@
   "type": "module",
   "scripts": {
     "clear-cache": "rm -rf node_modules/.vite",
-    "dev": "bun run clear-cache && NODE_ENV=development PORT=3000 bun run --hot server.ts",
+    "dev": "bun run clear-cache && NODE_ENV=development bun run --hot server.ts",
     "build": "bun run clear-cache && tsc && vite build",
     "build:server": "bun build --target=node --format=cjs --external vite --outfile dist/server.cjs server.ts",
-    "prod": "bun run build && NODE_ENV=production PORT=3000 bun run server.ts",
-    "start": "NODE_ENV=production PORT=3000 bun run server.ts",
+    "prod": "bun run build && bun run start",
+    "start": "NODE_ENV=production bun run server.ts",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "preview": "bun run vite preview",
@@ -21,6 +21,7 @@
     "test:client:ingestion": "bun tests/ingestion.test.ts",
     "test:runtime": "bun tests/runtime.zosite.ts",
     "test:runtime:bundle": "bun run build:server && bun tests/runtime.ts",
+    "test:browser": "bun tests/browser.ts",
     "test:all": "bun run test && bun run test:regression && bun run test:client:spatial && bun run test:client:export && bun run test:client:workspace && bun run test:client:ingestion && bun run test:runtime && bun run test:runtime:bundle"
   },
   "dependencies": {
@@ -43,6 +44,7 @@
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^6.1.1",
     "autoprefixer": "^10.4.20",
+    "playwright-core": "^1.65.0",
     "postcss": "^8.4.47",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.5.3",

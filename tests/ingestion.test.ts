@@ -222,6 +222,18 @@ trailer << /Root 1 0 R >>
   });
 
   // --------------------------------------------------------------------------
+  // Reject unsupported AI mode before it can falsify saved provenance.
+  // --------------------------------------------------------------------------
+  await test('AI import requests are rejected without persisting falsely enriched nodes', async () => {
+    const before = GraphStorage.getIngestedGraphSync();
+    const file = new File(['# Import fixture\n\nPreserve this source without inventing AI analysis.'], 'unsupported-ai.md', { type: 'text/markdown' });
+    const item = await ingestionService.ingestFile(file, { processingMode: 'SEMANTICALLY_ENRICHED' });
+    assert.strictEqual(item.status, 'error', 'An importer without an AI provider must not report AI enrichment');
+    assert.match(item.errorMessage || '', /Local Structural/);
+    assert.deepStrictEqual(GraphStorage.getIngestedGraphSync(), before, 'Rejected imports must not change the saved graph');
+  });
+
+  // --------------------------------------------------------------------------
   // FIXTURE G: Persistence & Memory Cache Integrity
   // --------------------------------------------------------------------------
   await test('Fixture G: Synchronous cache reflects committed nodes without mutating baseline topology', async () => {

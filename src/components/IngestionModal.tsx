@@ -485,14 +485,12 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
             </div>
           )}
 
-          {/* Dual-Mode Selector */}
+          {/* Local source import and the separate AI research workbench */}
           <div className="p-3.5 rounded-xl bg-slate-900/50 border border-slate-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
             <div>
               <span className="font-medium text-slate-200 block">Processing Mode</span>
               <span className="text-[11px] text-slate-400 font-mono">
-                {processingMode === 'STRUCTURALLY_INGESTED'
-                  ? 'Local Structural Mode: Deterministic parsing, 100% offline, zero AI calls.'
-                  : 'AI-Enriched Semantic Mode: Schema-validated entity and proposition extraction.'}
+                Local imports preserve your source text without AI calls. Use the workbench for AI-assisted research.
               </span>
             </div>
 
@@ -511,15 +509,12 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => setProcessingMode('SEMANTICALLY_ENRICHED')}
+                onClick={() => window.location.assign('/architect')}
                 disabled={isProcessing}
-                className={`px-3 py-1.5 rounded-md font-mono text-[11px] transition ${
-                  processingMode === 'SEMANTICALLY_ENRICHED'
-                    ? 'bg-purple-950 text-purple-300 border border-purple-600/50 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
+                title="Open the research workbench. Live AI generation requires provider setup."
+                className="px-3 py-1.5 rounded-md font-mono text-[11px] transition text-purple-300 hover:text-purple-100 disabled:opacity-50"
               >
-                AI Semantic
+                AI Research ↗
               </button>
             </div>
           </div>

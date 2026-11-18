@@ -1,7 +1,8 @@
 # Nihiltheism Architect — Grounded Epistemic Topology
 
 A local-first philosophical research workbench and topology visualiser for Journal314 and
-phenomenological inquiry, served as a **Zo Site**.
+phenomenological inquiry. It runs as a full-stack web app with the existing **Zo Site**
+configuration retained. See [START_HERE.md](START_HERE.md) for a short setup and saving guide.
 
 It has two surfaces over one backend:
 
@@ -26,7 +27,7 @@ Built with **Bun**, **React 18**, **Vite 8**, **TypeScript**, **Tailwind CSS 4**
 ```
 Browser ──HTTPS──▶ Zo front proxy (sets x-forwarded-host = real site host)
                         │
-                        ▼  platform port (58306 dev / 56831 production)
+                        ▼  platform port (3000 by default, overridable with PORT)
         Bun fetch server   export default { fetch, port, idleTimeout: 255 }
                         │   passes x-forwarded-host/proto through untouched;
                         │   fills them from request.url only when absent
@@ -51,25 +52,32 @@ edition, and the export bundle. The two tiers share `shared/types.ts`.
 
 ## Quickstart
 
-Requires **Bun 1.2+** (the runtime, the test runner, and the package manager). Node
+Requires **Bun** (verified with 1.4.4: runtime, test runner, and package manager). Node
 22.13+ is required only to execute the optional CJS bundle `dist/server.cjs`.
 
 ```bash
-bun install          # installs exactly the pinned versions in package.json
+bun install --frozen-lockfile # installs the versions recorded in bun.lock
 bun run typecheck    # tsc --noEmit
 bun run build        # tsc && vite build  → client bundle in dist/
-bun run dev          # development server on port 58306 (hot reload)
+bun run dev          # development server on port 3000 by default
 ```
 
 Development URLs:
 
 | Surface | URL |
 |---|---|
-| Visualiser | `http://127.0.0.1:58306/` |
-| Workbench | `http://127.0.0.1:58306/architect` |
-| Health | `http://127.0.0.1:58306/api/health` |
+| Visualiser | `http://127.0.0.1:3000/` |
+| Workbench | `http://127.0.0.1:3000/architect` |
+| Health | `http://127.0.0.1:3000/api/health` |
 
-Port `3000` belongs to another workspace occupant and is never used by this project.
+For production, run `bun run build` followed by `bun run start`. Both launch commands
+honor the hosting environment's `PORT`; without an override, `zosite.json` selects 3000.
+For example, `PORT=4000 bun run start` uses port 4000. Keep `DATA_DIR` on persistent
+storage when hosting the app.
+
+Graph nodes have a slow, independent bobbing motion, limited to three vertical screen
+pixels. Labels, connections, and click targets follow their positions. The graph layout
+and saved coordinates stay fixed; the new motion stops with reduced-motion preferences.
 
 ---
 
@@ -99,12 +107,20 @@ bun run test                  # 15 server acceptance tests      (tests/runner.ts
 bun run test:regression       # 18 regression tests             (tests/regression.test.ts)
 bun run test:client:spatial   # 9 spatial-engine tests          (tests/spatial.test.ts)
 bun run test:client:export    # 7 export-engine tests           (tests/export.test.ts)
-bun run test:client:ingestion # 20 ingestion/telemetry tests     (tests/ingestion.test.ts)
+bun run test:client:ingestion # 21 ingestion/telemetry tests     (tests/ingestion.test.ts)
 bun run test:client:workspace # 2 Google Workspace tests        (tests/workspace.test.ts)
 bun run test:runtime          # live fetch-bridge smoke         (tests/runtime.zosite.ts)
 bun run test:runtime:bundle   # CJS bundle smoke                (tests/runtime.ts)
 bun run test:all              # all of the above, in order
+# Optional browser acceptance suite; run build first:
+bun run test:browser          # desktop/mobile flows, disposable database and browser context
 ```
+
+The browser suite uses installed `/usr/bin/chromium`, `BROWSER_EXECUTABLE_PATH`, or
+Playwright's browser installation. If needed, install it with
+`bunx playwright-core install chromium`. Screenshots, downloads, and the verification
+summary are written to the ignored `artifacts/` directory. The suite disables live AI
+generation and does not sign in to Google.
 
 Coverage summary:
 
@@ -192,10 +208,14 @@ artefacts and are not tracked in git.
 
 ## Deployment
 
-`zosite.json` describes the Zo Site: development on port `58306`, production on
-`56831` (`bun run prod` → `build` then the production server). The published instance is
+`zosite.json` describes the Zo Site, with port `3000` for development and production
+unless `PORT` is supplied (`bun run prod` → `build` then the production server). The existing published instance is
 https://hypermarkmap-cosmic-nihilist.zocomputer.io. The platform supervisor restarts the
 production process cleanly; the port is never left double-bound.
+
+Local changes and a successful build do not update that instance automatically; publish
+the updated source through its hosting account. The graph and workbench must be served
+together with the backend, rather than publishing the `dist/` frontend alone.
 
 ## License
 

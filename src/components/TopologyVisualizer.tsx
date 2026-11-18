@@ -326,6 +326,7 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
   }>>([]);
 
   const timeRef = useRef(0);
+  const renderedNodesRef = useRef(new Map<string, PositionedVisualNode>());
   const labelCullerRef = useRef<ScreenSpaceLabelCuller>(new ScreenSpaceLabelCuller());
 
   // Defensive helper for canvas bounding box
@@ -485,7 +486,7 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
 
   // Center camera smoothly on any selected topology node
   const handleCenterNode = useCallback((node: EpistemicTopologyNode) => {
-    const pos = layoutTreeRef.current.find((n) => n.id === node.id);
+    const pos = renderedNodesRef.current.get(node.id) || layoutTreeRef.current.find((n) => n.id === node.id);
     if (!pos) return;
     const dim = canvasDimensionsRef.current;
     const drawerOffset = window.innerWidth >= 640 ? 180 : 0;
@@ -728,7 +729,8 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
       for (let i = currentNodes.length - 1; i >= 0; i--) {
         const node = currentNodes[i];
         const hitRadius = Math.max(node.radius || 12, 16);
-        const dist = Math.hypot(node.x - worldX, node.y - worldY);
+        const position = renderedNodesRef.current.get(node.id) || node;
+        const dist = Math.hypot(position.x - worldX, position.y - worldY);
         if (dist <= hitRadius) {
           hitId = node.id;
           break;
@@ -957,7 +959,8 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
     for (let i = currentNodes.length - 1; i >= 0; i--) {
       const node = currentNodes[i];
       const hitRadius = Math.max(node.radius || 12, 18);
-      const dist = Math.hypot(node.x - worldX, node.y - worldY);
+      const position = renderedNodesRef.current.get(node.id) || node;
+      const dist = Math.hypot(position.x - worldX, position.y - worldY);
       if (dist <= hitRadius) {
         found = node;
         break;
@@ -995,7 +998,8 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
     for (let i = currentNodes.length - 1; i >= 0; i--) {
       const node = currentNodes[i];
       const hitRadius = Math.max(node.radius || 12, 18);
-      const dist = Math.hypot(node.x - worldX, node.y - worldY);
+      const position = renderedNodesRef.current.get(node.id) || node;
+      const dist = Math.hypot(position.x - worldX, position.y - worldY);
       if (dist <= hitRadius) {
         found = node;
         break;
@@ -1011,8 +1015,9 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
       const targetScale = Math.min(4.0, Math.max(1.35, vp.scale));
       const dim = canvasDimensionsRef.current;
       const drawerOffset = window.innerWidth >= 640 ? 180 : 0;
-      const targetX = (dim.width - drawerOffset) / 2 - found.x * targetScale;
-      const targetY = dim.height / 2 - found.y * targetScale;
+      const position = renderedNodesRef.current.get(found.id) || found;
+      const targetX = (dim.width - drawerOffset) / 2 - position.x * targetScale;
+      const targetY = dim.height / 2 - position.y * targetScale;
       setViewport({ x: targetX, y: targetY, scale: targetScale });
     } else {
       handleResetView();
@@ -1059,6 +1064,14 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
 
     let running = true;
     let lastFrame = 0;
+    const motionPreference = window.matchMedia('(prefers-reduced-motion: reduce)');
+    let anchorNodes: PositionedVisualNode[] | null = null;
+    let anchorEdges: BundledVisualEdge[] = [];
+    let floatingNodes: Array<PositionedVisualNode & {
+      anchorX: number; anchorY: number; motionPhase: number; motionSpeed: number;
+    }> = [];
+    let floatingEdges: BundledVisualEdge[] = [];
+    let nodeLookup = new Map<string, PositionedVisualNode>();
 
     const handleResize = () => {
       const parent = canvasContainerRef.current || canvas.parentElement;
@@ -1101,8 +1114,32 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
       lastFrame = now;
       const t = timeRef.current;
       const vp = viewportRef.current;
-      const activeNodes = layoutTreeRef.current;
-      const activeEdges = bundledEdgesRef.current;
+      // Keep layout/storage coordinates fixed; animate reusable drawing copies.
+      if (anchorNodes !== layoutTreeRef.current) {
+        anchorNodes = layoutTreeRef.current;
+        floatingNodes = anchorNodes.map(node => {
+          let seed = 0;
+          for (let i = 0; i < node.id.length; i++) {
+            seed = (Math.imul(seed, 31) + node.id.charCodeAt(i)) >>> 0;
+          }
+          return {
+            ...node, anchorX: node.x, anchorY: node.y,
+            motionPhase: (seed % 360) * Math.PI / 180,
+            motionSpeed: 0.55 + (seed % 7) * 0.04
+          };
+        });
+        nodeLookup = new Map(floatingNodes.map(node => [node.id, node]));
+        floatingNodes.forEach(node => {
+          if (node.parent) node.parent = nodeLookup.get(node.parent.id) || node.parent;
+        });
+        renderedNodesRef.current = nodeLookup;
+      }
+      if (anchorEdges !== bundledEdgesRef.current) {
+        anchorEdges = bundledEdgesRef.current;
+        floatingEdges = anchorEdges.map(edge => ({ ...edge }));
+      }
+      const activeNodes = floatingNodes;
+      const activeEdges = floatingEdges;
       const activeHoverId = hoveredNodeIdRef.current;
 
       const width = canvasDimensionsRef.current.width;
@@ -1116,6 +1153,21 @@ export const TopologyVisualizer: React.FC<TopologyVisualizerProps> = ({
       const safeX = Number.isFinite(vp.x) ? vp.x : width / 2.8;
       const safeY = Number.isFinite(vp.y) ? vp.y : height / 2.2;
       const lodTier = getLoDTier(safeScale);
+
+      // Buoy-like bobbing: slow, independent rhythms, at most 3 vertical screen pixels.
+      const motionScale = motionPreference.matches ? 0 : Math.min(1, 1 / safeScale);
+      floatingNodes.forEach(node => {
+        node.x = node.anchorX + Math.sin(t * node.motionSpeed * 0.65 + node.motionPhase) * motionScale;
+        node.y = node.anchorY + Math.sin(t * node.motionSpeed + node.motionPhase) * 3 * motionScale;
+      });
+      floatingEdges.forEach((edge, i) => {
+        const source = nodeLookup.get(edge.source);
+        const target = nodeLookup.get(edge.target);
+        edge.sourceX = source?.x ?? anchorEdges[i].sourceX;
+        edge.sourceY = source?.y ?? anchorEdges[i].sourceY;
+        edge.targetX = target?.x ?? anchorEdges[i].targetX;
+        edge.targetY = target?.y ?? anchorEdges[i].targetY;
+      });
 
       ctx.save();
       ctx.clearRect(0, 0, width, height);

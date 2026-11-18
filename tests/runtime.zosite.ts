@@ -2,21 +2,24 @@
  * Smoke-test the production server as a Zo Site entrypoint (Bun default-export
  * fetch server bridging the Express app). The repo's tests/runtime.ts targets
  * a dist/server.cjs bundle that package.json never builds; this variant boots
- * the real production entrypoint with a disposable database instead.
+ * the production start command with a disposable database instead. This also
+ * verifies that hosting-provided PORT overrides reach the real server.
  */
 import { spawn } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+import { getTestPort } from './ports';
 
 const cwd = process.cwd();
-const port = 3002;
+const port = await getTestPort();
 const base = `http://127.0.0.1:${port}`;
-const child = spawn('bun', ['server.ts'], {
+const child = spawn('bun', ['run', 'start'], {
   cwd, env: { ...process.env, NODE_ENV: 'production', PORT: String(port), HOST: '127.0.0.1', DATA_DIR: mkdtempSync(path.join(tmpdir(), 'hypermark-zosite-')), OPENROUTER_API_KEY: '' },
-  stdio: ['ignore', 'pipe', 'pipe'],
+  stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32',
 });
+const exited = new Promise<void>(resolve => child.once('exit', () => resolve()));
 let stderr = '';
 child.stderr.on('data', chunk => { stderr += chunk.toString(); });
 async function json(url: string, init?: RequestInit) {
@@ -54,5 +57,9 @@ try {
   console.error(stderr.replace(/ExperimentalWarning[^\\n]*\\n/g, ''));
   throw error;
 } finally {
-  child.kill();
+  if (child.exitCode === null && child.pid) {
+    if (process.platform === 'win32') child.kill();
+    else process.kill(-child.pid, 'SIGTERM');
+    await exited;
+  }
 }

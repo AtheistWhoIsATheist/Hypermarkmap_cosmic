@@ -29,8 +29,10 @@ import type {
   HypermapTreeNode,
   HypermapNodeInput,
   HypermapStats,
-  HypermapDensifyResult
+  HypermapDensifyResult,
+  FullExportBundle
 } from '../shared/types';
+export type { FullExportBundle } from '../shared/types';
 
 // Synchronous savepoints keep related writes atomic without locking during API calls.
 function atomic<T>(fn: () => T): T {
@@ -843,20 +845,6 @@ Return valid JSON adhering to:
 // 5. EXPORT ENGINE (Markdown, JSON, ZIP bundle)
 // ---------------------------------------------------------------------------
 
-export interface FullExportBundle {
-  project: Project;
-  sources: Source[];
-  passages: Passage[];
-  concepts: Concept[];
-  claims: Claim[];
-  objections: Objection[];
-  contradictions: Contradiction[];
-  corrections: Correction[];
-  revisions: Revision[];
-  auditReport: AuditReport;
-  manuscriptChapters: any[];
-}
-
 export function getFullExportBundle(projectId = 'proj_journal314_canonical'): FullExportBundle {
   const db = getDb();
   const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId) as any;
@@ -870,6 +858,11 @@ export function getFullExportBundle(projectId = 'proj_journal314_canonical'): Fu
   const revisions = db.prepare('SELECT * FROM revisions WHERE project_id = ?').all(projectId) as any[];
   const auditReport = performAudit(projectId);
   const manuscriptChapters = db.prepare('SELECT * FROM manuscript_sections ORDER BY chapter_number ASC').all() as any[];
+  const hypermapNodes = db.prepare('SELECT * FROM hypermap_nodes WHERE project_id = ?').all(projectId) as any[];
+  const researchJobs = db.prepare('SELECT * FROM research_jobs WHERE project_id = ?').all(projectId) as any[];
+  const relations = db.prepare('SELECT * FROM relations WHERE project_id = ?').all(projectId) as any[];
+  const reviewDecisions = db.prepare('SELECT d.* FROM review_decisions d JOIN revisions r ON d.revision_id = r.id WHERE r.project_id = ?').all(projectId) as any[];
+  const jobEvents = db.prepare('SELECT e.* FROM job_events e JOIN research_jobs j ON e.job_id = j.id WHERE j.project_id = ?').all(projectId) as any[];
 
   return {
     project,
@@ -882,7 +875,12 @@ export function getFullExportBundle(projectId = 'proj_journal314_canonical'): Fu
     corrections,
     revisions,
     auditReport,
-    manuscriptChapters
+    manuscriptChapters,
+    hypermapNodes,
+    researchJobs,
+    relations,
+    reviewDecisions,
+    jobEvents
   };
 }
 
@@ -919,6 +917,8 @@ export function generateManuscriptMarkdown(chapters: any[]): string {
 export async function createExportZip(projectId = 'proj_journal314_canonical'): Promise<Buffer> {
   const bundle = getFullExportBundle(projectId);
   const zip = new JSZip();
+  // Include every exported record, including source passages, graph edits, and research history.
+  zip.file('database.json', JSON.stringify(bundle, null, 2));
 
   // 1. Full Manuscript
   const manuscriptMd = generateManuscriptMarkdown(bundle.manuscriptChapters);
@@ -941,6 +941,7 @@ export async function createExportZip(projectId = 'proj_journal314_canonical'): 
 **Project**: ${bundle.project?.name || 'Journal314 Canonical Architecture'}
 
 ## CONTENTS
+- \`database.json\`: Full project bundle, including passages, hypermap nodes, research jobs, and all datasets below.
 - \`manuscript.md\`: Complete 17-chapter philosophical reference edition (${totalWords.toLocaleString()} words).
 - \`audit_report.json\`: Epistemic verification ledger & reference integrity audit (${bundle.auditReport.overall_status}).
 - \`corpus_sources.json\`: Ingested source files and provenance metadata.
