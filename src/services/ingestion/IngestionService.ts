@@ -793,7 +793,7 @@ export class IngestionService {
       mimeType: file.type || 'text/plain',
       status: 'processing',
       stageLabel: 'Validating format & size guardrails',
-      processingMode: options.processingMode || 'STRUCTURALLY_INGESTED',
+      processingMode: 'STRUCTURALLY_INGESTED',
       warnings: []
     };
 
@@ -811,6 +811,9 @@ export class IngestionService {
     };
 
     try {
+      if (options.processingMode && options.processingMode !== 'STRUCTURALLY_INGESTED') {
+        throw new Error('This importer supports Local Structural mode only. Use the Architect Workbench for AI research.');
+      }
       // Step 1: File Validation (Size check, 64-byte magic-byte inspection)
       updateStage('Validating format & size guardrails');
       await yieldToMain();
@@ -896,7 +899,7 @@ export class IngestionService {
       const edges = [...parsedPayload.edges];
 
       // Ensure processing mode is labeled on all nodes
-      const mode = options.processingMode || 'STRUCTURALLY_INGESTED';
+      const mode = 'STRUCTURALLY_INGESTED' as const;
       for (const n of nodes) {
         n.processingMode = mode;
       }

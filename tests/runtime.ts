@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+import { getTestPort } from './ports';
 
 // The Node/CJS bundle is a secondary artifact: the Zo Site runs server.ts
 // directly under Bun (tests/runtime.zosite.ts). Build it on demand so this
@@ -17,7 +18,7 @@ if (!existsSync(bundlePath)) {
 }
 
 const cwd = process.cwd();
-const port = 3002;
+const port = await getTestPort();
 const base = `http://127.0.0.1:${port}`;
 const nodeBinary = process.env.NODE_BINARY || 'node';
 const child = spawn(nodeBinary, ['dist/server.cjs'], {

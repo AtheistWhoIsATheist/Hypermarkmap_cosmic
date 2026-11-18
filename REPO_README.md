@@ -1,3 +1,9 @@
+# Historical platform notes
+
+This document records an earlier deployment and verification run. For the current
+launch commands, port settings, and test suite, use [README.md](README.md) and
+[START_HERE.md](START_HERE.md).
+
 # HyperMarkMap Cosmic — Nihiltheism Architect v1.0 (Zo Site)
 
 A dialectical hypermap workbench over the JOURNAL314 corpus: Express + SQLite (WAL, FTS5)

@@ -299,6 +299,11 @@ export interface FullExportBundle {
   revisions: Revision[];
   auditReport: AuditReport;
   manuscriptChapters: ManuscriptSection[];
+  hypermapNodes: HypermapNode[];
+  researchJobs: ResearchJob[];
+  relations: Relation[];
+  reviewDecisions: ReviewDecision[];
+  jobEvents: JobEvent[];
 }
 
 // ---------------------------------------------------------------------------

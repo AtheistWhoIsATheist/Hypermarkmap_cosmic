@@ -56,7 +56,7 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab, onExpor
               </div>
               <div>
                 <span className="font-serif font-bold tracking-tight text-lg text-zinc-100 flex items-center gap-1.5">
-                  Nihiltheism <span className="text-amber-500 font-sans font-medium text-xs px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/20">ARCHITECT v1.0</span>
+                  Nihiltheism <span className="hidden sm:inline-flex text-amber-500 font-sans font-medium text-xs px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/20 whitespace-nowrap">ARCHITECT v1.0</span>
                 </span>
                 <p className="text-[10px] text-zinc-400 font-mono tracking-wide hidden sm:block">
                   PEC-Ω Constitutional Research Workbench & Corpus
@@ -64,27 +64,6 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab, onExpor
               </div>
             </button>
           </div>
-
-          {/* Nav Items */}
-          <nav className="hidden md:flex items-center space-x-1 lg:space-x-1.5">
-            {navItems.map((item) => {
-              const isActive = activeTab === item.id;
-              return (
-                <button
-                  key={item.id}
-                  onClick={() => setActiveTab(item.id)}
-                  className={`flex items-center space-x-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
-                    isActive
-                      ? 'bg-zinc-800 text-amber-400 border border-zinc-700 shadow-sm'
-                      : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900'
-                  }`}
-                >
-                  {item.icon}
-                  <span>{item.label}</span>
-                </button>
-              );
-            })}
-          </nav>
 
           {/* Quick Actions & Export */}
           <div className="flex items-center space-x-2">
@@ -103,15 +82,16 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab, onExpor
           </div>
         </div>
 
-        {/* Mobile Navigation Row */}
-        <div className="md:hidden flex items-center space-x-1 overflow-x-auto py-2 border-t border-zinc-800/60 no-scrollbar">
+        {/* A separate scrollable row keeps every research tool readable on any screen. */}
+        <nav aria-label="Research tools" className="flex items-center gap-1 overflow-x-auto py-2 border-t border-zinc-800/60">
           {navItems.map((item) => {
             const isActive = activeTab === item.id;
             return (
               <button
                 key={item.id}
                 onClick={() => setActiveTab(item.id)}
-                className={`whitespace-nowrap flex items-center space-x-1 px-2.5 py-1 text-xs rounded transition-colors ${
+                aria-current={isActive ? 'page' : undefined}
+                className={`shrink-0 whitespace-nowrap flex items-center space-x-1.5 px-3 py-2 text-xs rounded transition-colors ${
                   isActive
                     ? 'bg-zinc-800 text-amber-400 font-medium'
                     : 'text-zinc-400 hover:bg-zinc-900'
@@ -122,7 +102,7 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab, onExpor
               </button>
             );
           })}
-        </div>
+        </nav>
       </div>
     </header>
   );

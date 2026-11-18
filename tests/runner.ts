@@ -30,6 +30,7 @@ import {
   densifyHypermapNode
 } from '../server/services';
 import assert from 'node:assert';
+import JSZip from 'jszip';
 
 async function runTests() {
   console.log('--- STARTING NIHILTHEISM ARCHITECT ACCEPTANCE TESTS ---');
@@ -189,6 +190,12 @@ This openness to mystery allows humans to dwell authentically on the earth.
 
   // 11. Full Export (JSON and ZIP)
   await test('A11/Export: Produces JSON bundle and ZIP archive with all artifacts', async () => {
+    const db = getDb();
+    const concept = db.prepare('SELECT id FROM concepts LIMIT 1').get() as { id: string };
+    db.prepare('INSERT INTO revisions (id, project_id, entity_type, entity_id, original_content, proposed_content, role, rationale, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run('rev_export_fixture', 'proj_journal314_canonical', 'concept', concept.id, 'Synthetic original', 'Synthetic proposal', 'editor', 'Export fixture', 'rejected', new Date().toISOString());
+    db.prepare('INSERT INTO review_decisions (id, revision_id, decision, reviewer_notes, decided_at) VALUES (?, ?, ?, ?, ?)')
+      .run('review_export_fixture', 'rev_export_fixture', 'rejected', 'Synthetic reviewer note retained in backup.', new Date().toISOString());
     const bundle = getFullExportBundle();
     assert(bundle.project, 'Bundle missing project');
     assert(bundle.sources.length >= 1, 'Bundle missing sources');
@@ -201,6 +208,16 @@ This openness to mystery allows humans to dwell authentically on the earth.
 
     const zipBuffer = await createExportZip();
     assert(zipBuffer.length > 10000, 'Zip archive should be non-trivial size');
+    const archive = await JSZip.loadAsync(zipBuffer);
+    const database = archive.file('database.json');
+    assert(database, 'ZIP must include the full database bundle, not just selected tables');
+    const saved = JSON.parse(await database.async('string'));
+    assert.deepStrictEqual(saved.passages, JSON.parse(JSON.stringify(bundle.passages)), 'ZIP must preserve the imported passage text');
+    assert(saved.hypermapNodes.length >= 1808, 'Exports must retain the workbench graph');
+    assert(saved.researchJobs.length >= 1, 'Exports must retain the research run history');
+    assert(saved.relations?.length >= 1, 'Exports must retain graph relationships');
+    assert(saved.jobEvents?.some((event: { event_type: string }) => event.event_type === 'cycle_complete'), 'Exports must retain per-cycle research logs');
+    assert(saved.reviewDecisions?.some((decision: { id: string; reviewer_notes: string }) => decision.id === 'review_export_fixture' && decision.reviewer_notes === 'Synthetic reviewer note retained in backup.'), 'Exports must retain reviewer decisions and notes');
     console.log(`    Export ZIP size: ${(zipBuffer.length / 1024).toFixed(1)} KB`);
   });
 
